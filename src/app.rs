@@ -60,11 +60,15 @@ fn restore_history(config: &Config) -> (Vec<Entry>, u64, String) {
         .unwrap_or_default()
         .saturating_add(1);
     let mut recovered = 0;
-    if let Some(archive_path) = config
-        .settings
-        .get("download_archive")
-        .filter(|path| !path.trim().is_empty())
-    {
+    let archive_path = if std::path::Path::new(HISTORY_FILE).exists() {
+        None
+    } else {
+        config
+            .settings
+            .get("download_archive")
+            .filter(|path| !path.trim().is_empty())
+    };
+    if let Some(archive_path) = archive_path {
         match std::fs::read_to_string(archive_path) {
             Ok(contents) => {
                 for line in contents.lines() {
@@ -92,7 +96,9 @@ fn restore_history(config: &Config) -> (Vec<Entry>, u64, String) {
                     }
                     history.push(Entry {
                         id: next_id,
-                        title: url.clone(),
+                        title: String::new(),
+                        already_in_history: false,
+                        completed_at: 0,
                         url,
                         status: "Finished".into(),
                         progress: "Recovered from yt-dlp archive".into(),
@@ -127,6 +133,13 @@ fn persist_history(history: &[Entry]) -> std::io::Result<()> {
     let contents =
         toml::to_string_pretty(&file).map_err(|error| std::io::Error::other(error.to_string()))?;
     std::fs::write(HISTORY_FILE, contents)
+}
+
+fn unix_timestamp() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64
 }
 use eframe::egui;
 use std::{
@@ -174,9 +187,6 @@ impl App {
         let mut normalized_staging = Vec::<Entry>::new();
         for mut entry in staging.drain(..) {
             entry.url = normalize_staging_url(&entry.url);
-            if entry.title.trim().is_empty() {
-                entry.title.clone_from(&entry.url);
-            }
             if let Some(existing) = normalized_staging
                 .iter_mut()
                 .find(|existing| canonical(&existing.url) == canonical(&entry.url))
@@ -202,8 +212,14 @@ impl App {
         } else {
             staging_notice
         };
+        let title_lookups: Vec<_> = staging
+            .iter()
+            .chain(&history)
+            .filter(|entry| entry.title.trim().is_empty())
+            .map(|entry| (entry.id, entry.url.clone()))
+            .collect();
         let (tx, rx) = mpsc::channel();
-        Self {
+        let app = Self {
             config,
             staging_snapshot,
             staging,
@@ -223,7 +239,11 @@ impl App {
             notice,
             command_text: String::new(),
             command_error: None,
+        };
+        for (id, url) in title_lookups {
+            app.lookup_title(id, url, false);
         }
+        app
     }
 
     pub(crate) fn add_url(&mut self, url: &str) {
@@ -249,6 +269,8 @@ impl App {
         self.staging.push(Entry {
             id: self.next_id,
             title: String::new(),
+            already_in_history,
+            completed_at: 0,
             url: clean.clone(),
             status: "Ready".into(),
             progress: String::new(),
@@ -257,11 +279,8 @@ impl App {
             extra_args: String::new(),
         });
         self.save_staging_if_changed();
-        self.lookup_title(self.next_id, clean.clone());
+        self.lookup_title(self.next_id, clean.clone(), true);
         self.next_id += 1;
-        if already_in_history {
-            self.notice = format!("Added to staging; this link is already in history: {clean}");
-        }
     }
 
     pub(crate) fn save_config(&mut self) {
@@ -276,8 +295,18 @@ impl App {
 
     fn save_history(&mut self) {
         if let Err(error) = persist_history(&self.history) {
-            self.notice = format!("Download finished, but history could not be saved: {error}");
+            self.notice = format!("Could not save download history: {error}");
         }
+    }
+
+    pub(crate) fn remove_history_entry(&mut self, id: u64) {
+        self.history.retain(|entry| entry.id != id);
+        self.save_history();
+    }
+
+    pub(crate) fn clear_history(&mut self) {
+        self.history.clear();
+        self.save_history();
     }
 
     fn save_staging_if_changed(&mut self) {
@@ -296,7 +325,7 @@ impl App {
         self.save_staging_if_changed();
     }
 
-    fn lookup_title(&self, id: u64, url: String) {
+    fn lookup_title(&self, id: u64, url: String, notify_when_ready: bool) {
         let executable = self.config.executable.clone();
         let settings = self.config.settings.clone();
         let tx = self.tx.clone();
@@ -328,7 +357,7 @@ impl App {
                 Ok(output) => Err(String::from_utf8_lossy(&output.stderr).trim().to_string()),
                 Err(error) => Err(format!("Could not start {executable}: {error}")),
             };
-            let _ = tx.send(Event::Title(id, title));
+            let _ = tx.send(Event::Title(id, title, notify_when_ready));
         });
     }
 
@@ -803,6 +832,7 @@ impl App {
                                 entry.status = "Finished".into();
                                 entry.progress = "Complete".into();
                                 entry.error.clear();
+                                entry.completed_at = unix_timestamp();
                                 self.history.push(entry);
                                 self.save_history();
                             }
@@ -835,16 +865,23 @@ impl App {
                         );
                     }
                 }
-                Event::Title(id, result) => {
-                    let fallback_title = self
-                        .staging
-                        .iter()
-                        .chain(&self.downloads)
-                        .chain(&self.history)
-                        .find(|entry| entry.id == id)
-                        .map(|entry| entry.url.clone())
-                        .unwrap_or_default();
-                    let title = result.unwrap_or(fallback_title);
+                Event::Title(id, result, notify_when_ready) => {
+                    let title = match result {
+                        Ok(title) if !title.trim().is_empty() => title.trim().to_string(),
+                        _ => {
+                            if notify_when_ready {
+                                if let Some(url) = self
+                                    .staging
+                                    .iter()
+                                    .find(|entry| entry.id == id)
+                                    .map(|entry| entry.url.clone())
+                                {
+                                    self.notify("Download staged", &url, &url);
+                                }
+                            }
+                            continue;
+                        }
+                    };
                     let in_history = self.history.iter().any(|entry| entry.id == id);
                     let is_staged = self.staging.iter().any(|entry| entry.id == id);
                     let mut staged_url = None;
@@ -862,7 +899,9 @@ impl App {
                         }
                     }
                     if let Some(url) = staged_url {
-                        self.notify("Download staged", &title, &url);
+                        if notify_when_ready {
+                            self.notify("Download staged", &title, &url);
+                        }
                         self.save_staging_if_changed();
                     }
                     if in_history {

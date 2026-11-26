@@ -503,6 +503,10 @@ pub(crate) struct Entry {
     pub(crate) id: u64,
     #[serde(default)]
     pub(crate) title: String,
+    #[serde(default)]
+    pub(crate) already_in_history: bool,
+    #[serde(default)]
+    pub(crate) completed_at: i64,
     pub(crate) url: String,
     pub(crate) status: String,
     pub(crate) progress: String,
@@ -521,7 +525,7 @@ pub(crate) enum Event {
     Line(u64, String),
     Done(u64, Result<(), String>),
     Formats(u64, Result<Vec<VideoFormat>, String>),
-    Title(u64, Result<String, String>),
+    Title(u64, Result<String, String>, bool),
 }
 
 #[derive(Clone)]

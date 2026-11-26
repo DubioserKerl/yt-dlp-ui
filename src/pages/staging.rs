@@ -40,7 +40,20 @@ pub(super) fn show(app: &mut App, ui: &mut egui::Ui) {
                 } else {
                     "⚠ Failed"
                 });
-                ui.label(&entry.url);
+                ui.vertical(|ui| {
+                    if !entry.title.is_empty() {
+                        ui.strong(&entry.title);
+                    }
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(&entry.url);
+                        if entry.already_in_history {
+                            ui.colored_label(
+                                egui::Color32::YELLOW,
+                                "⚠ Already in download history",
+                            );
+                        }
+                    });
+                });
                 if ui.button("Download").clicked() {
                     start_ids.push(entry.id);
                 }

@@ -10,7 +10,12 @@ pub(super) fn show(app: &mut App, ui: &mut egui::Ui) {
     for entry in &app.downloads {
         ui.group(|ui| {
             ui.horizontal(|ui| {
-                ui.label(&entry.url);
+                ui.vertical(|ui| {
+                    if !entry.title.is_empty() {
+                        ui.strong(&entry.title);
+                    }
+                    ui.label(&entry.url);
+                });
                 ui.strong(&entry.status);
                 if entry.status != "Queued"
                     && entry.status != "Cancelling…"
