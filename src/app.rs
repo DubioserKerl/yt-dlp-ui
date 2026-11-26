@@ -92,6 +92,7 @@ fn restore_history(config: &Config) -> (Vec<Entry>, u64, String) {
                     }
                     history.push(Entry {
                         id: next_id,
+                        title: url.clone(),
                         url,
                         status: "Finished".into(),
                         progress: "Recovered from yt-dlp archive".into(),
@@ -146,8 +147,10 @@ pub(crate) struct App {
     pub(crate) downloads: Vec<Entry>,
     pub(crate) history: Vec<Entry>,
     pub(crate) format_states: HashMap<u64, FormatState>,
+    notification_processes: Vec<Child>,
     page: Page,
     next_id: u64,
+    next_notification_at: Instant,
     tx: Sender<Event>,
     rx: Receiver<Event>,
     running_cancel: Option<(u64, Sender<()>)>,
@@ -171,6 +174,9 @@ impl App {
         let mut normalized_staging = Vec::<Entry>::new();
         for mut entry in staging.drain(..) {
             entry.url = normalize_staging_url(&entry.url);
+            if entry.title.trim().is_empty() {
+                entry.title.clone_from(&entry.url);
+            }
             if let Some(existing) = normalized_staging
                 .iter_mut()
                 .find(|existing| canonical(&existing.url) == canonical(&entry.url))
@@ -204,8 +210,10 @@ impl App {
             downloads: Vec::new(),
             history,
             format_states: HashMap::new(),
+            notification_processes: Vec::new(),
             page: Page::Staging,
             next_id,
+            next_notification_at: Instant::now(),
             tx,
             rx,
             running_cancel: None,
@@ -240,6 +248,7 @@ impl App {
 
         self.staging.push(Entry {
             id: self.next_id,
+            title: String::new(),
             url: clean.clone(),
             status: "Ready".into(),
             progress: String::new(),
@@ -247,6 +256,8 @@ impl App {
             overrides: Default::default(),
             extra_args: String::new(),
         });
+        self.save_staging_if_changed();
+        self.lookup_title(self.next_id, clean.clone());
         self.next_id += 1;
         if already_in_history {
             self.notice = format!("Added to staging; this link is already in history: {clean}");
@@ -276,6 +287,94 @@ impl App {
         match persist_staging(&self.staging) {
             Ok(()) => self.staging_snapshot.clone_from(&self.staging),
             Err(error) => self.notice = format!("Could not save download staging: {error}"),
+        }
+    }
+
+    pub(crate) fn remove_staging(&mut self, id: u64) {
+        self.staging.retain(|entry| entry.id != id);
+        self.format_states.remove(&id);
+        self.save_staging_if_changed();
+    }
+
+    fn lookup_title(&self, id: u64, url: String) {
+        let executable = self.config.executable.clone();
+        let settings = self.config.settings.clone();
+        let tx = self.tx.clone();
+        thread::spawn(move || {
+            let mut command = Command::new(&executable);
+            command
+                .args(["--no-warnings", "--color", "never", "--get-title"])
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            for (key, flag) in [
+                ("proxy", "--proxy"),
+                ("cookies", "--cookies"),
+                ("cookies_from_browser", "--cookies-from-browser"),
+                ("socket_timeout", "--socket-timeout"),
+            ] {
+                if let Some(value) = settings.get(key).filter(|value| !value.is_empty()) {
+                    command.args([flag, value]);
+                }
+            }
+            command.arg(&url);
+            configure_hidden_console(&mut command);
+            let title = match command.output() {
+                Ok(output) if output.status.success() => String::from_utf8_lossy(&output.stdout)
+                    .lines()
+                    .find(|line| !line.trim().is_empty())
+                    .map(str::trim)
+                    .map(str::to_string)
+                    .ok_or_else(|| "yt-dlp returned no title".to_string()),
+                Ok(output) => Err(String::from_utf8_lossy(&output.stderr).trim().to_string()),
+                Err(error) => Err(format!("Could not start {executable}: {error}")),
+            };
+            let _ = tx.send(Event::Title(id, title));
+        });
+    }
+
+    fn notify(&mut self, heading: &str, title: &str, url: &str) {
+        let Ok(executable) = std::env::current_exe() else {
+            return;
+        };
+        let now = Instant::now();
+        let start_at = self.next_notification_at.max(now);
+        let delay = start_at.saturating_duration_since(now);
+        let delay_ms = delay.as_millis().to_string();
+        let display_seconds = self.config.notification_display_seconds.clamp(1, 60);
+        let display_seconds_arg = display_seconds.to_string();
+        let color_scheme = self.config.notification_color_scheme.as_str();
+        let mut command = Command::new(executable);
+        command
+            .args([
+                "--notification",
+                &delay_ms,
+                &display_seconds_arg,
+                color_scheme,
+                heading,
+                title,
+                url,
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        configure_hidden_console(&mut command);
+        if let Ok(process) = command.spawn() {
+            self.notification_processes.push(process);
+            self.next_notification_at = start_at + Duration::from_secs(display_seconds as u64);
+        }
+    }
+
+    fn reap_notification_processes(&mut self, close_all: bool) {
+        self.notification_processes.retain_mut(|process| {
+            if close_all {
+                let _ = process.kill();
+                let _ = process.wait();
+                return false;
+            }
+            !matches!(process.try_wait(), Ok(Some(_)) | Err(_))
+        });
+        if self.notification_processes.is_empty() {
+            self.next_notification_at = Instant::now();
         }
     }
 
@@ -325,10 +424,17 @@ impl App {
     pub(crate) fn start_download(&mut self, index: usize) {
         let mut entry = self.staging.remove(index);
         self.format_states.remove(&entry.id);
+        let title = if entry.title.is_empty() {
+            entry.url.clone()
+        } else {
+            entry.title.clone()
+        };
+        self.notify("Added to downloads", &title, &entry.url);
         entry.status = "Queued".into();
         entry.progress.clear();
         entry.error.clear();
         self.downloads.push(entry);
+        self.save_staging_if_changed();
         self.start_next_download();
     }
 
@@ -687,6 +793,11 @@ impl App {
                         {
                             self.running_cancel = None;
                         }
+                        let (heading, title, url) = match &result {
+                            Ok(()) => ("Download finished", entry.title.clone(), entry.url.clone()),
+                            Err(_) => ("Download failed", entry.title.clone(), entry.url.clone()),
+                        };
+                        self.notify(heading, &title, &url);
                         match result {
                             Ok(()) => {
                                 entry.status = "Finished".into();
@@ -704,9 +815,13 @@ impl App {
                                     entry.error.push_str(&error);
                                 }
                                 self.staging.push(entry);
+                                self.save_staging_if_changed();
                             }
                         }
                         self.start_next_download();
+                        if self.downloads.is_empty() {
+                            self.notify("All current downloads are complete", "", "");
+                        }
                     }
                 }
                 Event::Formats(id, result) => {
@@ -718,6 +833,40 @@ impl App {
                                 Err(error) => FormatState::Failed(error),
                             },
                         );
+                    }
+                }
+                Event::Title(id, result) => {
+                    let fallback_title = self
+                        .staging
+                        .iter()
+                        .chain(&self.downloads)
+                        .chain(&self.history)
+                        .find(|entry| entry.id == id)
+                        .map(|entry| entry.url.clone())
+                        .unwrap_or_default();
+                    let title = result.unwrap_or(fallback_title);
+                    let in_history = self.history.iter().any(|entry| entry.id == id);
+                    let is_staged = self.staging.iter().any(|entry| entry.id == id);
+                    let mut staged_url = None;
+                    for entry in self
+                        .staging
+                        .iter_mut()
+                        .chain(&mut self.downloads)
+                        .chain(&mut self.history)
+                    {
+                        if entry.id == id {
+                            entry.title.clone_from(&title);
+                            if is_staged {
+                                staged_url = Some(entry.url.clone());
+                            }
+                        }
+                    }
+                    if let Some(url) = staged_url {
+                        self.notify("Download staged", &title, &url);
+                        self.save_staging_if_changed();
+                    }
+                    if in_history {
+                        self.save_history();
                     }
                 }
             }
@@ -783,6 +932,8 @@ fn configure_hidden_console(command: &mut Command) {
 
 impl eframe::App for App {
     fn update(&mut self, context: &egui::Context, _frame: &mut eframe::Frame) {
+        let closing = context.input(|input| input.viewport().close_requested());
+        self.reap_notification_processes(closing);
         self.poll_clipboard();
         self.receive_download_events();
 
@@ -820,6 +971,25 @@ impl eframe::App for App {
 }
 
 pub(crate) fn run() -> eframe::Result<()> {
+    let mut arguments = std::env::args().skip(1);
+    if arguments.next().as_deref() == Some("--notification") {
+        let delay_ms = arguments
+            .next()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or_default();
+        let display_seconds = arguments
+            .next()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(6)
+            .clamp(1, 60);
+        let color_scheme = arguments.next().unwrap_or_else(|| "Blue".into());
+        let heading = arguments.next().unwrap_or_else(|| "yt-dlp UI".into());
+        let title = arguments.next().unwrap_or_default();
+        let url = arguments.next().unwrap_or_default();
+        thread::sleep(Duration::from_millis(delay_ms));
+        return run_notification(heading, title, url, display_seconds, color_scheme);
+    }
+
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1280.0, 900.0])
@@ -829,6 +999,164 @@ pub(crate) fn run() -> eframe::Result<()> {
         ..Default::default()
     };
     eframe::run_native("yt-dlp UI", options, Box::new(|_| Ok(Box::new(App::new()))))
+}
+
+struct NotificationPopup {
+    heading: String,
+    title: String,
+    url: String,
+    display_time: Duration,
+    color_scheme: String,
+    app_icon: egui::TextureHandle,
+    started_at: Instant,
+}
+
+impl eframe::App for NotificationPopup {
+    fn update(&mut self, context: &egui::Context, _frame: &mut eframe::Frame) {
+        let elapsed = self.started_at.elapsed();
+        if elapsed >= self.display_time || context.input(|input| input.viewport().close_requested())
+        {
+            context.send_viewport_cmd(egui::ViewportCommand::Close);
+            return;
+        }
+
+        let monitor_size = context.input(|input| {
+            input
+                .viewport()
+                .monitor_size
+                .unwrap_or(egui::vec2(800.0, 600.0))
+        });
+        let window_size = egui::vec2(460.0, 170.0);
+        let target_x = (monitor_size.x - window_size.x - 24.0).max(12.0);
+        let target_y = (monitor_size.y - window_size.y - 24.0).max(12.0);
+        let slide_duration = Duration::from_millis(450);
+        let entering = (elapsed.as_secs_f32() / slide_duration.as_secs_f32()).clamp(0.0, 1.0);
+        let remaining = self.display_time.saturating_sub(elapsed);
+        let leaving = (remaining.as_secs_f32() / slide_duration.as_secs_f32()).clamp(0.0, 1.0);
+        let progress = entering.min(leaving);
+        let eased_progress = progress * progress * (3.0 - 2.0 * progress);
+        let x = target_x + (monitor_size.x + 12.0 - target_x) * (1.0 - eased_progress);
+        context.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(
+            x, target_y,
+        )));
+
+        let (background, border, accent) = notification_colors(&self.color_scheme);
+        egui::CentralPanel::default()
+            .frame(
+                egui::Frame::new()
+                    .fill(background)
+                    .stroke(egui::Stroke::new(2.0_f32, border))
+                    .corner_radius(12.0_f32)
+                    .inner_margin(16.0),
+            )
+            .show(context, |ui| {
+                ui.horizontal(|ui| {
+                    ui.image((self.app_icon.id(), egui::vec2(30.0, 30.0)));
+                    ui.vertical(|ui| {
+                        ui.label(egui::RichText::new("yt-dlp UI").size(16.0).strong());
+                        ui.label(
+                            egui::RichText::new(&self.heading)
+                                .size(14.0)
+                                .color(accent)
+                                .strong(),
+                        );
+                    });
+                });
+                if !self.title.is_empty() {
+                    ui.add_space(4.0);
+                    ui.label(egui::RichText::new(&self.title).size(18.0).strong());
+                }
+                if !self.url.is_empty() {
+                    ui.add_space(4.0);
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(&self.url)
+                                .size(13.0)
+                                .color(egui::Color32::from_gray(190)),
+                        )
+                        .wrap(),
+                    );
+                }
+            });
+
+        let animating = elapsed < slide_duration || remaining < slide_duration;
+        context.request_repaint_after(if animating {
+            Duration::from_millis(16)
+        } else {
+            Duration::from_millis(100)
+        });
+    }
+}
+
+fn run_notification(
+    heading: String,
+    title: String,
+    url: String,
+    display_seconds: u64,
+    color_scheme: String,
+) -> eframe::Result<()> {
+    let options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            .with_title("yt-dlp UI notification")
+            .with_inner_size([460.0, 170.0])
+            .with_position([0.0, 0.0])
+            .with_decorations(false)
+            .with_resizable(false)
+            .with_taskbar(false)
+            .with_always_on_top()
+            .with_active(true)
+            .with_icon(window_icon()),
+        ..Default::default()
+    };
+    eframe::run_native(
+        "yt-dlp UI notification",
+        options,
+        Box::new(move |creation_context| {
+            let image = image::load_from_memory(include_bytes!("../resources/yt-dlp-ui.png"))
+                .expect("the embedded application icon must be a valid PNG")
+                .into_rgba8();
+            let [width, height] = [image.width() as usize, image.height() as usize];
+            let app_icon = creation_context.egui_ctx.load_texture(
+                "yt-dlp-ui-notification-icon",
+                egui::ColorImage::from_rgba_unmultiplied([width, height], image.as_raw()),
+                egui::TextureOptions::LINEAR,
+            );
+            Ok(Box::new(NotificationPopup {
+                heading,
+                title,
+                url,
+                display_time: Duration::from_secs(display_seconds),
+                color_scheme,
+                app_icon,
+                started_at: Instant::now(),
+            }))
+        }),
+    )
+}
+
+fn notification_colors(scheme: &str) -> (egui::Color32, egui::Color32, egui::Color32) {
+    match scheme {
+        "Green" => (
+            egui::Color32::from_rgb(20, 36, 31),
+            egui::Color32::from_rgb(64, 190, 130),
+            egui::Color32::from_rgb(128, 230, 170),
+        ),
+        "Purple" => (
+            egui::Color32::from_rgb(32, 26, 42),
+            egui::Color32::from_rgb(166, 120, 235),
+            egui::Color32::from_rgb(205, 170, 255),
+        ),
+        "Amber" => (
+            egui::Color32::from_rgb(42, 34, 22),
+            egui::Color32::from_rgb(235, 170, 60),
+            egui::Color32::from_rgb(255, 205, 110),
+        ),
+        _ => (
+            egui::Color32::from_rgb(22, 29, 42),
+            egui::Color32::from_rgb(72, 160, 240),
+            egui::Color32::from_rgb(116, 190, 255),
+        ),
+    }
 }
 
 fn window_icon() -> egui::IconData {

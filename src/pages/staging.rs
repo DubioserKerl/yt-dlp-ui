@@ -91,10 +91,7 @@ pub(super) fn show(app: &mut App, ui: &mut egui::Ui) {
         });
     }
     if let Some(id) = remove_id {
-        if let Some(index) = app.staging.iter().position(|entry| entry.id == id) {
-            app.staging.remove(index);
-        }
-        app.format_states.remove(&id);
+        app.remove_staging(id);
     }
     if download_all {
         start_ids = app.staging.iter().map(|entry| entry.id).collect();

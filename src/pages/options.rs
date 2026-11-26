@@ -6,6 +6,30 @@ use eframe::egui;
 
 pub(super) fn show(app: &mut App, ui: &mut egui::Ui) {
     ui.heading("Options");
+    ui.group(|ui| {
+        ui.heading("Notifications");
+        ui.horizontal(|ui| {
+            ui.label("Display time (seconds)");
+            ui.add(
+                egui::DragValue::new(&mut app.config.notification_display_seconds).range(1..=60),
+            );
+        });
+        ui.horizontal(|ui| {
+            ui.label("Color scheme");
+            egui::ComboBox::from_id_salt("notification-color-scheme")
+                .selected_text(&app.config.notification_color_scheme)
+                .show_ui(ui, |ui| {
+                    for scheme in ["Blue", "Green", "Purple", "Amber"] {
+                        ui.selectable_value(
+                            &mut app.config.notification_color_scheme,
+                            scheme.to_string(),
+                            scheme,
+                        );
+                    }
+                });
+        });
+    });
+
     ui.horizontal(|ui| {
         ui.label("yt-dlp executable");
         ui.text_edit_singleline(&mut app.config.executable);

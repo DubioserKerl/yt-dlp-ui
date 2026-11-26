@@ -7,6 +7,8 @@ pub(crate) struct Config {
     pub(crate) executable: String,
     pub(crate) settings: BTreeMap<String, String>,
     pub(crate) extra_args: String,
+    pub(crate) notification_display_seconds: u32,
+    pub(crate) notification_color_scheme: String,
 }
 
 impl Default for Config {
@@ -63,6 +65,8 @@ impl Default for Config {
             executable: "yt-dlp".into(),
             settings,
             extra_args: String::new(),
+            notification_display_seconds: 6,
+            notification_color_scheme: "Blue".into(),
         }
     }
 }
@@ -497,6 +501,8 @@ pub(crate) const SPECS: &[Spec] = &[
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct Entry {
     pub(crate) id: u64,
+    #[serde(default)]
+    pub(crate) title: String,
     pub(crate) url: String,
     pub(crate) status: String,
     pub(crate) progress: String,
@@ -515,6 +521,7 @@ pub(crate) enum Event {
     Line(u64, String),
     Done(u64, Result<(), String>),
     Formats(u64, Result<Vec<VideoFormat>, String>),
+    Title(u64, Result<String, String>),
 }
 
 #[derive(Clone)]
