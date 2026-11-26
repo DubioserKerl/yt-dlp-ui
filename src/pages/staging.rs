@@ -107,11 +107,12 @@ pub(super) fn show(app: &mut App, ui: &mut egui::Ui) {
         app.remove_staging(id);
     }
     if download_all {
-        start_ids = app.staging.iter().map(|entry| entry.id).collect();
-    }
-    for id in start_ids {
-        if let Some(index) = app.staging.iter().position(|entry| entry.id == id) {
-            app.start_download(index);
+        app.start_all_downloads();
+    } else {
+        for id in start_ids {
+            if let Some(index) = app.staging.iter().position(|entry| entry.id == id) {
+                app.start_download(index);
+            }
         }
     }
     for id in format_load_ids {

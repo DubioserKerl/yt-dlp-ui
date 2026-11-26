@@ -451,14 +451,37 @@ impl App {
     }
 
     pub(crate) fn start_download(&mut self, index: usize) {
+        self.queue_download(index, true);
+    }
+
+    pub(crate) fn start_all_downloads(&mut self) {
+        let count = self.staging.len();
+        if count == 0 {
+            return;
+        }
+
+        while !self.staging.is_empty() {
+            self.queue_download(0, false);
+        }
+        self.page = Page::Downloads;
+        self.notify(
+            &format!("Added {count} downloads to the download queue"),
+            "",
+            "",
+        );
+    }
+
+    fn queue_download(&mut self, index: usize, show_notification: bool) {
         let mut entry = self.staging.remove(index);
         self.format_states.remove(&entry.id);
-        let title = if entry.title.is_empty() {
-            entry.url.clone()
-        } else {
-            entry.title.clone()
-        };
-        self.notify("Added to downloads", &title, &entry.url);
+        if show_notification {
+            let title = if entry.title.is_empty() {
+                entry.url.clone()
+            } else {
+                entry.title.clone()
+            };
+            self.notify("Added to downloads", &title, &entry.url);
+        }
         entry.status = "Queued".into();
         entry.progress.clear();
         entry.error.clear();
