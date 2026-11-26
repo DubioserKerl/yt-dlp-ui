@@ -305,6 +305,11 @@ pub(crate) struct Entry {
     pub(crate) extra_args: String,
 }
 
+#[derive(Default, Serialize, Deserialize)]
+pub(crate) struct HistoryFile {
+    pub(crate) entries: Vec<Entry>,
+}
+
 #[derive(Clone)]
 pub(crate) enum Event {
     Line(u64, String),

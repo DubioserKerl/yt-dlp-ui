@@ -1,8 +1,102 @@
 use crate::{
     helpers::{canonical, cleanup_partial_files, is_youtube_url, parse_command_line, pump_output},
-    model::{Config, Entry, Event, Page, SPECS},
+    model::{Config, Entry, Event, HistoryFile, Page, SPECS},
     pages,
 };
+
+const HISTORY_FILE: &str = "yt-dlp-ui-history.toml";
+
+fn restore_history(config: &Config) -> (Vec<Entry>, u64, String) {
+    let mut notice = String::new();
+    let mut history = match std::fs::read_to_string(HISTORY_FILE) {
+        Ok(contents) => match toml::from_str::<HistoryFile>(&contents) {
+            Ok(saved) => saved.entries,
+            Err(error) => {
+                notice = format!("Could not read saved download history: {error}");
+                Vec::new()
+            }
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => {
+            notice = format!("Could not read saved download history: {error}");
+            Vec::new()
+        }
+    };
+
+    let mut next_id = history
+        .iter()
+        .map(|entry| entry.id)
+        .max()
+        .unwrap_or_default()
+        .saturating_add(1);
+    let mut recovered = 0;
+    if let Some(archive_path) = config
+        .settings
+        .get("download_archive")
+        .filter(|path| !path.trim().is_empty())
+    {
+        match std::fs::read_to_string(archive_path) {
+            Ok(contents) => {
+                for line in contents.lines() {
+                    let mut fields = line.split_whitespace();
+                    let Some(extractor) = fields.next() else {
+                        continue;
+                    };
+                    let Some(video_id) = fields.next() else {
+                        continue;
+                    };
+                    if !extractor.eq_ignore_ascii_case("youtube")
+                        || !video_id.chars().all(|character| {
+                            character.is_ascii_alphanumeric() || "_-".contains(character)
+                        })
+                    {
+                        continue;
+                    }
+
+                    let url = format!("https://www.youtube.com/watch?v={video_id}");
+                    if history
+                        .iter()
+                        .any(|entry| canonical(&entry.url) == canonical(&url))
+                    {
+                        continue;
+                    }
+                    history.push(Entry {
+                        id: next_id,
+                        url,
+                        status: "Finished".into(),
+                        progress: "Recovered from yt-dlp archive".into(),
+                        error: String::new(),
+                        overrides: Default::default(),
+                        extra_args: String::new(),
+                    });
+                    next_id = next_id.saturating_add(1);
+                    recovered += 1;
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => notice = format!("Could not read yt-dlp archive: {error}"),
+        }
+    }
+
+    if recovered > 0 {
+        if let Err(error) = persist_history(&history) {
+            notice =
+                format!("Recovered {recovered} downloads, but could not save history: {error}");
+        } else {
+            notice = format!("Restored {recovered} downloads from the yt-dlp archive.");
+        }
+    }
+    (history, next_id, notice)
+}
+
+fn persist_history(history: &[Entry]) -> std::io::Result<()> {
+    let file = HistoryFile {
+        entries: history.to_vec(),
+    };
+    let contents =
+        toml::to_string_pretty(&file).map_err(|error| std::io::Error::other(error.to_string()))?;
+    std::fs::write(HISTORY_FILE, contents)
+}
 use eframe::egui;
 use std::{
     process::{Child, Command, Stdio},
@@ -38,21 +132,22 @@ impl App {
             .ok()
             .and_then(|contents| toml::from_str(&contents).ok())
             .unwrap_or_default();
+        let (history, next_id, notice) = restore_history(&config);
         let (tx, rx) = mpsc::channel();
         Self {
             config,
             staging: Vec::new(),
             downloads: Vec::new(),
-            history: Vec::new(),
+            history,
             page: Page::Staging,
-            next_id: 1,
+            next_id,
             tx,
             rx,
             running_cancel: None,
             clipboard: arboard::Clipboard::new().ok(),
             last_clipboard: String::new(),
             next_clip_poll: Instant::now(),
-            notice: String::new(),
+            notice,
             command_text: String::new(),
             command_error: None,
         }
@@ -94,6 +189,12 @@ impl App {
             },
             Err(error) => format!("Could not serialize settings: {error}"),
         };
+    }
+
+    fn save_history(&mut self) {
+        if let Err(error) = persist_history(&self.history) {
+            self.notice = format!("Download finished, but history could not be saved: {error}");
+        }
     }
 
     fn command_args(&self, entry: &Entry) -> Vec<String> {
@@ -432,6 +533,7 @@ impl App {
                                 entry.progress = "Complete".into();
                                 entry.error.clear();
                                 self.history.push(entry);
+                                self.save_history();
                             }
                             Err(error) => {
                                 entry.status = "Failed".into();

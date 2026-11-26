@@ -27,6 +27,8 @@ The UI exposes common format, output, path, audio, subtitle, retry, proxy, cooki
 
 The window opens at 1280 × 900 and can be resized. Page content scrolls in both directions when it does not fit the available space. The application icon is available as SVG, PNG, and multi-resolution ICO under `resources/`; Windows builds embed the ICO in the executable.
 
+Completed downloads are saved in `yt-dlp-ui-history.toml` in the current working directory and restored on startup. When a `--download-archive` file is configured, existing YouTube IDs in that archive are added to the UI history on startup, so downloads from before this persistence feature can be recovered as URLs. Archive-recovered entries have no original title metadata.
+
 ## Source layout
 
 - `src/app.rs` owns app state, clipboard polling, command execution, and download transitions.
