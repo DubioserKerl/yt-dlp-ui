@@ -1,4 +1,4 @@
-use crate::model::{Config, Kind, SPECS, Spec};
+use crate::model::{Config, Kind, OptionCategory, SPECS, Spec};
 use eframe::egui;
 use std::{
     collections::BTreeMap,
@@ -8,8 +8,12 @@ use std::{
     thread,
 };
 
-pub(crate) fn render_specs(ui: &mut egui::Ui, values: &mut BTreeMap<String, String>) {
-    for spec in SPECS {
+pub(crate) fn render_specs(
+    ui: &mut egui::Ui,
+    values: &mut BTreeMap<String, String>,
+    scope: egui::Id,
+) {
+    render_option_sections(ui, scope, true, |ui, spec| {
         let value = values.entry(spec.key.into()).or_insert_with(|| {
             Config::default()
                 .settings
@@ -22,22 +26,22 @@ pub(crate) fn render_specs(ui: &mut egui::Ui, values: &mut BTreeMap<String, Stri
             setting_editor(ui, value, spec);
             ui.label(spec.help);
         });
-    }
+    });
 }
 
 pub(crate) fn render_overrides(
     ui: &mut egui::Ui,
     overrides: &mut BTreeMap<String, String>,
     baseline: &BTreeMap<String, String>,
+    scope: egui::Id,
 ) {
-    for spec in SPECS {
+    render_option_sections(ui, scope, false, |ui, spec| {
         let inherited = baseline.get(spec.key).cloned().unwrap_or_default();
         let mut enabled = overrides.contains_key(spec.key);
         let mut value = overrides
             .get(spec.key)
             .cloned()
             .unwrap_or_else(|| inherited.clone());
-
         ui.horizontal(|ui| {
             ui.add_sized([190.0, 22.0], egui::Label::new(spec.label));
             if ui.checkbox(&mut enabled, "Override").changed() && enabled {
@@ -54,13 +58,47 @@ pub(crate) fn render_overrides(
             }
             ui.label(spec.help);
         });
-
         if enabled {
             overrides.insert(spec.key.into(), value);
         } else {
             overrides.remove(spec.key);
         }
+    });
+}
+
+fn render_option_sections(
+    ui: &mut egui::Ui,
+    scope: egui::Id,
+    default_open: bool,
+    mut render_option: impl FnMut(&mut egui::Ui, &Spec),
+) {
+    for category in OptionCategory::HELP_ORDER {
+        if !SPECS.iter().any(|spec| spec.category() == category) {
+            continue;
+        }
+        egui::CollapsingHeader::new(category.title())
+            .id_salt((scope, category.id()))
+            .default_open(default_open)
+            .show(ui, |ui| {
+                for spec in SPECS.iter().filter(|spec| spec.category() == category) {
+                    render_option(ui, spec);
+                }
+            });
     }
+}
+
+pub(crate) fn render_extra_args(
+    ui: &mut egui::Ui,
+    extra_args: &mut String,
+    scope: egui::Id,
+    default_open: bool,
+) {
+    egui::CollapsingHeader::new("Additional arguments")
+        .id_salt((scope, "additional-arguments"))
+        .default_open(default_open)
+        .show(ui, |ui| {
+            ui.text_edit_singleline(extra_args);
+        });
 }
 
 fn setting_editor(ui: &mut egui::Ui, value: &mut String, spec: &Spec) {

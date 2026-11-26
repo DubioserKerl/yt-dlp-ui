@@ -1,4 +1,7 @@
-use crate::{app::App, helpers::render_specs};
+use crate::{
+    app::App,
+    helpers::{render_extra_args, render_specs},
+};
 use eframe::egui;
 
 pub(super) fn show(app: &mut App, ui: &mut egui::Ui) {
@@ -13,11 +16,17 @@ pub(super) fn show(app: &mut App, ui: &mut egui::Ui) {
         }
     });
     ui.label("Baseline arguments");
-    render_specs(ui, &mut app.config.settings);
-    ui.horizontal(|ui| {
-        ui.label("Additional arguments");
-        ui.text_edit_singleline(&mut app.config.extra_args);
-    });
+    render_specs(
+        ui,
+        &mut app.config.settings,
+        egui::Id::new("baseline-options"),
+    );
+    render_extra_args(
+        ui,
+        &mut app.config.extra_args,
+        egui::Id::new("baseline-extra-arguments"),
+        true,
+    );
 
     ui.separator();
     if ui.button("Save settings").clicked() {
@@ -31,17 +40,20 @@ pub(super) fn show(app: &mut App, ui: &mut egui::Ui) {
             app.export_config();
         }
     });
-    ui.separator();
-    ui.heading("Command line import / export");
-    ui.text_edit_multiline(&mut app.command_text);
-    ui.horizontal(|ui| {
-        if ui.button("Import command line").clicked() {
-            app.import_command();
-        }
-        if ui.button("Export command line").clicked() {
-            app.export_command();
-        }
-    });
+    egui::CollapsingHeader::new("Command line import / export")
+        .id_salt("command-line-tools")
+        .default_open(true)
+        .show(ui, |ui| {
+            ui.text_edit_multiline(&mut app.command_text);
+            ui.horizontal(|ui| {
+                if ui.button("Import command line").clicked() {
+                    app.import_command();
+                }
+                if ui.button("Export command line").clicked() {
+                    app.export_command();
+                }
+            });
+        });
 
     if let Some(error) = app.command_error.clone() {
         let mut dismiss = false;

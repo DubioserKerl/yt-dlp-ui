@@ -1,4 +1,7 @@
-use crate::{app::App, helpers::render_overrides};
+use crate::{
+    app::App,
+    helpers::{render_extra_args, render_overrides},
+};
 use eframe::egui;
 
 pub(super) fn show(app: &mut App, ui: &mut egui::Ui) {
@@ -45,9 +48,9 @@ pub(super) fn show(app: &mut App, ui: &mut egui::Ui) {
                 }
             }
             ui.collapsing("Override arguments for this download", |ui| {
-                render_overrides(ui, &mut entry.overrides, &baseline);
-                ui.label("Additional arguments");
-                ui.text_edit_singleline(&mut entry.extra_args);
+                let scope = egui::Id::new(("download-overrides", entry.id));
+                render_overrides(ui, &mut entry.overrides, &baseline, scope);
+                render_extra_args(ui, &mut entry.extra_args, scope, false);
             });
         });
     }

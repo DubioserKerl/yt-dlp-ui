@@ -72,6 +72,87 @@ pub(crate) struct Spec {
     pub(crate) help: &'static str,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OptionCategory {
+    General,
+    Network,
+    GeoRestriction,
+    VideoSelection,
+    Download,
+    Filesystem,
+    Thumbnail,
+    InternetShortcut,
+    Verbosity,
+}
+
+impl OptionCategory {
+    pub(crate) const HELP_ORDER: [Self; 9] = [
+        Self::General,
+        Self::Network,
+        Self::GeoRestriction,
+        Self::VideoSelection,
+        Self::Download,
+        Self::Filesystem,
+        Self::Thumbnail,
+        Self::InternetShortcut,
+        Self::Verbosity,
+    ];
+
+    pub(crate) fn title(self) -> &'static str {
+        match self {
+            Self::General => "General Options",
+            Self::Network => "Network Options",
+            Self::GeoRestriction => "Geo-restriction",
+            Self::VideoSelection => "Video Selection",
+            Self::Download => "Download Options",
+            Self::Filesystem => "Filesystem Options",
+            Self::Thumbnail => "Thumbnail Options",
+            Self::InternetShortcut => "Internet Shortcut Options",
+            Self::Verbosity => "Verbosity and Simulation Options",
+        }
+    }
+
+    pub(crate) fn id(self) -> &'static str {
+        match self {
+            Self::General => "general",
+            Self::Network => "network",
+            Self::GeoRestriction => "geo-restriction",
+            Self::VideoSelection => "video-selection",
+            Self::Download => "download",
+            Self::Filesystem => "filesystem",
+            Self::Thumbnail => "thumbnail",
+            Self::InternetShortcut => "internet-shortcut",
+            Self::Verbosity => "verbosity",
+        }
+    }
+}
+
+impl Spec {
+    pub(crate) fn category(&self) -> OptionCategory {
+        match self.key {
+            "ignore_errors" => OptionCategory::General,
+            "proxy" => OptionCategory::Network,
+            "date_after"
+            | "date_before"
+            | "playlist_items"
+            | "download_archive"
+            | "playlist"
+            | "sponsorblock"
+            | "sponsorblock_remove" => OptionCategory::VideoSelection,
+            "output" | "paths" | "cookies" | "continue" | "no_part" | "windows_filenames" => {
+                OptionCategory::Filesystem
+            }
+            "embed_thumbnail" => OptionCategory::Thumbnail,
+            "no_warnings" => OptionCategory::Verbosity,
+            "format" | "audio_format" | "audio_quality" | "rate_limit" | "retries"
+            | "fragment_retries" | "sub_langs" | "write_subs" | "write_auto_subs"
+            | "embed_subs" | "embed_chapters" | "extract_audio" | "embed_metadata"
+            | "ffmpeg_location" => OptionCategory::Download,
+            _ => OptionCategory::Download,
+        }
+    }
+}
+
 pub(crate) const SPECS: &[Spec] = &[
     Spec {
         key: "format",
