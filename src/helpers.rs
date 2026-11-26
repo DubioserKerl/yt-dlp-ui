@@ -474,28 +474,17 @@ fn strip_outer_quotes(command: &str) -> &str {
     }
 }
 
-pub(crate) fn parse_progress_fraction(progress: &str) -> Option<f32> {
-    if !progress.to_ascii_lowercase().contains("[download]") {
-        return None;
+pub(crate) fn progress_fraction(progress: &str) -> f32 {
+    if let Some(percent_index) = progress.find('%') {
+        let start = progress[..percent_index]
+            .rfind(|character: char| !character.is_ascii_digit() && character != '.')
+            .map(|index| index + 1)
+            .unwrap_or(0);
+        return progress[start..percent_index]
+            .parse::<f32>()
+            .unwrap_or(0.0)
+            .clamp(0.0, 100.0)
+            / 100.0;
     }
-    let percent_index = progress.find('%')?;
-    let start = progress[..percent_index]
-        .rfind(|character: char| !character.is_ascii_digit() && character != '.')
-        .map(|index| index + 1)
-        .unwrap_or(0);
-    progress[start..percent_index]
-        .parse::<f32>()
-        .ok()
-        .map(|percent| percent.clamp(0.0, 100.0) / 100.0)
-}
-
-pub(crate) fn parse_playlist_position(line: &str) -> Option<(u32, u32)> {
-    let lower = line.to_ascii_lowercase();
-    let marker = "downloading item ";
-    let start = lower.find(marker)? + marker.len();
-    let remainder = &line[start..];
-    let (position, total) = remainder.split_once(" of ")?;
-    let position = position.trim().parse::<u32>().ok()?;
-    let total = total.split_whitespace().next()?.parse::<u32>().ok()?;
-    (position > 0 && total > 0).then_some((position, total))
+    0.0
 }

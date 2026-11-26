@@ -509,8 +509,6 @@ pub(crate) struct Entry {
     pub(crate) already_in_history: bool,
     #[serde(default)]
     pub(crate) completed_at: i64,
-    #[serde(default)]
-    pub(crate) download_progress: f32,
     pub(crate) url: String,
     pub(crate) status: String,
     pub(crate) progress: String,

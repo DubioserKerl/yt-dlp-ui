@@ -1,8 +1,7 @@
 use crate::{
     helpers::{
         canonical, cleanup_partial_files, is_youtube_url, normalize_staging_url,
-        parse_command_line, parse_format_list, parse_playlist_position, parse_progress_fraction,
-        pump_output,
+        parse_command_line, parse_format_list, pump_output,
     },
     model::{Config, Entry, Event, FormatState, HistoryFile, Page, SPECS},
     pages,
@@ -100,7 +99,6 @@ fn restore_history(config: &Config) -> (Vec<Entry>, u64, String) {
                         title: String::new(),
                         already_in_history: false,
                         completed_at: 0,
-                        download_progress: 0.0,
                         url,
                         status: "Finished".into(),
                         progress: "Recovered from yt-dlp archive".into(),
@@ -155,12 +153,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-#[derive(Default)]
-struct DownloadProgress {
-    fraction: f32,
-    playlist_position: Option<(u32, u32)>,
-}
-
 pub(crate) struct App {
     pub(crate) config: Config,
     pub(crate) staging: Vec<Entry>,
@@ -168,7 +160,6 @@ pub(crate) struct App {
     pub(crate) downloads: Vec<Entry>,
     pub(crate) history: Vec<Entry>,
     pub(crate) format_states: HashMap<u64, FormatState>,
-    download_progress: HashMap<u64, DownloadProgress>,
     notification_processes: Vec<Child>,
     page: Page,
     next_id: u64,
@@ -240,7 +231,6 @@ impl App {
             downloads: Vec::new(),
             history,
             format_states: HashMap::new(),
-            download_progress: HashMap::new(),
             notification_processes: Vec::new(),
             page: Page::Staging,
             next_id,
@@ -286,7 +276,6 @@ impl App {
             title: String::new(),
             already_in_history,
             completed_at: 0,
-            download_progress: 0.0,
             url: clean.clone(),
             status: "Ready".into(),
             progress: String::new(),
@@ -508,10 +497,7 @@ impl App {
         }
         entry.status = "Queued".into();
         entry.progress.clear();
-        entry.download_progress = 0.0;
         entry.error.clear();
-        self.download_progress
-            .insert(entry.id, DownloadProgress::default());
         self.downloads.push(entry);
         self.save_staging_if_changed();
         self.start_next_download();
@@ -854,20 +840,6 @@ impl App {
         while let Ok(event) = self.rx.try_recv() {
             match event {
                 Event::Line(id, line) => {
-                    let tracker = self.download_progress.entry(id).or_default();
-                    if let Some(position) = parse_playlist_position(&line) {
-                        tracker.playlist_position = Some(position);
-                    }
-                    if let Some(item_fraction) = parse_progress_fraction(&line) {
-                        let overall_fraction =
-                            if let Some((position, total)) = tracker.playlist_position {
-                                let position = position.saturating_sub(1) as f32;
-                                ((position + item_fraction) / total.max(1) as f32).clamp(0.0, 1.0)
-                            } else {
-                                item_fraction
-                            };
-                        tracker.fraction = tracker.fraction.max(overall_fraction.min(0.99));
-                    }
                     if let Some(entry) = self.downloads.iter_mut().find(|entry| entry.id == id) {
                         if entry.status != "Cancelling…" {
                             entry.status = "Downloading".into();
@@ -875,14 +847,12 @@ impl App {
                         if line.contains('%') || !line.trim().is_empty() {
                             entry.progress = line.clone();
                         }
-                        entry.download_progress = tracker.fraction;
                         if line.to_lowercase().contains("error:") {
                             entry.error = line;
                         }
                     }
                 }
                 Event::Done(id, result) => {
-                    self.download_progress.remove(&id);
                     if let Some(position) = self.downloads.iter().position(|entry| entry.id == id) {
                         let mut entry = self.downloads.remove(position);
                         if self
@@ -901,7 +871,6 @@ impl App {
                             Ok(()) => {
                                 entry.status = "Finished".into();
                                 entry.progress = "Complete".into();
-                                entry.download_progress = 1.0;
                                 entry.error.clear();
                                 entry.completed_at = unix_timestamp();
                                 self.history.push(entry);
