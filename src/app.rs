@@ -1,12 +1,15 @@
 use crate::{
-    helpers::{canonical, is_youtube_url, parse_command_line, pump},
+    helpers::{canonical, cleanup_partial_files, is_youtube_url, parse_command_line, pump_output},
     model::{Config, Entry, Event, Page, SPECS},
     pages,
 };
 use eframe::egui;
 use std::{
-    process::{Command, Stdio},
-    sync::mpsc::{self, Receiver, Sender},
+    process::{Child, Command, Stdio},
+    sync::{
+        Arc, Mutex,
+        mpsc::{self, Receiver, Sender},
+    },
     thread,
     time::{Duration, Instant},
 };
@@ -14,12 +17,13 @@ use std::{
 pub(crate) struct App {
     pub(crate) config: Config,
     pub(crate) staging: Vec<Entry>,
-    pub(crate) active: Vec<Entry>,
+    pub(crate) downloads: Vec<Entry>,
     pub(crate) history: Vec<Entry>,
     page: Page,
     next_id: u64,
     tx: Sender<Event>,
     rx: Receiver<Event>,
+    running_cancel: Option<(u64, Sender<()>)>,
     clipboard: Option<arboard::Clipboard>,
     last_clipboard: String,
     next_clip_poll: Instant,
@@ -38,12 +42,13 @@ impl App {
         Self {
             config,
             staging: Vec::new(),
-            active: Vec::new(),
+            downloads: Vec::new(),
             history: Vec::new(),
             page: Page::Staging,
             next_id: 1,
             tx,
             rx,
+            running_cancel: None,
             clipboard: arboard::Clipboard::new().ok(),
             last_clipboard: String::new(),
             next_clip_poll: Instant::now(),
@@ -61,7 +66,7 @@ impl App {
         let duplicate = self
             .staging
             .iter()
-            .chain(&self.active)
+            .chain(&self.downloads)
             .chain(&self.history)
             .any(|entry| canonical(&entry.url) == canonical(&clean));
         if duplicate {
@@ -135,23 +140,64 @@ impl App {
     }
 
     pub(crate) fn start_download(&mut self, index: usize) {
-        let entry = self.staging.remove(index);
+        let mut entry = self.staging.remove(index);
+        entry.status = "Queued".into();
+        entry.progress.clear();
+        entry.error.clear();
+        self.downloads.push(entry);
+        self.start_next_download();
+    }
+
+    pub(crate) fn cancel_download(&mut self, id: u64) {
+        let Some((running_id, cancel)) = &self.running_cancel else {
+            return;
+        };
+        if *running_id != id {
+            return;
+        }
+        if let Some(entry) = self.downloads.iter_mut().find(|entry| entry.id == id) {
+            entry.status = "Cancelling…".into();
+        }
+        let _ = cancel.send(());
+    }
+
+    fn start_next_download(&mut self) {
+        if self.running_cancel.is_some() {
+            return;
+        }
+        let Some(index) = self
+            .downloads
+            .iter()
+            .position(|entry| entry.status == "Queued")
+        else {
+            return;
+        };
+
+        self.downloads[index].status = "Starting…".into();
+        let entry = self.downloads[index].clone();
+        let id = entry.id;
         let args = self.command_args(&entry);
         let executable = self.config.executable.clone();
+        let no_part = args.iter().any(|argument| argument == "--no-part");
         let tx = self.tx.clone();
-        let id = entry.id;
-        self.active.push(Entry {
-            status: "Starting…".into(),
-            ..entry
-        });
+        let (cancel_tx, cancel_rx) = mpsc::channel();
+        self.running_cancel = Some((id, cancel_tx));
 
         thread::spawn(move || {
-            let mut child = match Command::new(&executable)
+            let mut command = Command::new(&executable);
+            command
+                .arg("--newline")
                 .args(&args)
                 .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .spawn()
+                .stderr(Stdio::piped());
+            #[cfg(windows)]
             {
+                use std::os::windows::process::CommandExt;
+                const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+                command.creation_flags(CREATE_NO_WINDOW);
+            }
+
+            let mut child = match command.spawn() {
                 Ok(child) => child,
                 Err(error) => {
                     let _ = tx.send(Event::Done(
@@ -162,16 +208,39 @@ impl App {
                 }
             };
 
+            let output_files = Arc::new(Mutex::new(Vec::new()));
+            let mut readers = Vec::new();
             if let Some(stdout) = child.stdout.take() {
-                pump(stdout, tx.clone(), id);
+                readers.push(pump_output(stdout, tx.clone(), id, output_files.clone()));
             }
             if let Some(stderr) = child.stderr.take() {
-                pump(stderr, tx.clone(), id);
+                readers.push(pump_output(stderr, tx.clone(), id, output_files.clone()));
             }
-            let result = match child.wait() {
-                Ok(status) if status.success() => Ok(()),
-                Ok(status) => Err(format!("yt-dlp exited with {status}")),
-                Err(error) => Err(error.to_string()),
+
+            let (cancelled, status) = wait_for_process(&mut child, cancel_rx);
+            for reader in readers {
+                let _ = reader.join();
+            }
+
+            let result = if cancelled {
+                let files = output_files
+                    .lock()
+                    .map(|files| files.clone())
+                    .unwrap_or_default();
+                let cleanup_errors = cleanup_partial_files(&files, no_part);
+                let mut message =
+                    "Cancelled by user; partial download files were removed.".to_string();
+                if !cleanup_errors.is_empty() {
+                    message.push_str(" Cleanup issues: ");
+                    message.push_str(&cleanup_errors.join("; "));
+                }
+                Err(message)
+            } else {
+                match status {
+                    Ok(status) if status.success() => Ok(()),
+                    Ok(status) => Err(format!("yt-dlp exited with {status}")),
+                    Err(error) => Err(error.to_string()),
+                }
             };
             let _ = tx.send(Event::Done(id, result));
         });
@@ -335,8 +404,10 @@ impl App {
         while let Ok(event) = self.rx.try_recv() {
             match event {
                 Event::Line(id, line) => {
-                    if let Some(entry) = self.active.iter_mut().find(|entry| entry.id == id) {
-                        entry.status = "Downloading".into();
+                    if let Some(entry) = self.downloads.iter_mut().find(|entry| entry.id == id) {
+                        if entry.status != "Cancelling…" {
+                            entry.status = "Downloading".into();
+                        }
                         if line.contains('%') || !line.trim().is_empty() {
                             entry.progress = line.clone();
                         }
@@ -346,8 +417,15 @@ impl App {
                     }
                 }
                 Event::Done(id, result) => {
-                    if let Some(position) = self.active.iter().position(|entry| entry.id == id) {
-                        let mut entry = self.active.remove(position);
+                    if let Some(position) = self.downloads.iter().position(|entry| entry.id == id) {
+                        let mut entry = self.downloads.remove(position);
+                        if self
+                            .running_cancel
+                            .as_ref()
+                            .is_some_and(|(running_id, _)| *running_id == id)
+                        {
+                            self.running_cancel = None;
+                        }
                         match result {
                             Ok(()) => {
                                 entry.status = "Finished".into();
@@ -366,9 +444,27 @@ impl App {
                                 self.staging.push(entry);
                             }
                         }
+                        self.start_next_download();
                     }
                 }
             }
+        }
+    }
+}
+
+fn wait_for_process(
+    child: &mut Child,
+    cancel: Receiver<()>,
+) -> (bool, std::io::Result<std::process::ExitStatus>) {
+    loop {
+        if cancel.try_recv().is_ok() {
+            let _ = child.kill();
+            return (true, child.wait());
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => return (false, Ok(status)),
+            Ok(None) => thread::sleep(Duration::from_millis(40)),
+            Err(error) => return (false, Err(error)),
         }
     }
 }

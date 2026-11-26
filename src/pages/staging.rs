@@ -11,12 +11,18 @@ pub(super) fn show(app: &mut App, ui: &mut egui::Ui) {
             app.add_url(&url);
         }
     });
+    let mut download_all = false;
+    ui.add_enabled_ui(!app.staging.is_empty(), |ui| {
+        if ui.button("Download all").clicked() {
+            download_all = true;
+        }
+    });
     ui.separator();
 
     let baseline = app.config.settings.clone();
-    let mut remove_index = None;
-    let mut start_indexes = Vec::new();
-    for (index, entry) in app.staging.iter_mut().enumerate() {
+    let mut remove_id = None;
+    let mut start_ids = Vec::new();
+    for entry in app.staging.iter_mut() {
         ui.group(|ui| {
             ui.horizontal(|ui| {
                 ui.label(if entry.error.is_empty() {
@@ -26,10 +32,10 @@ pub(super) fn show(app: &mut App, ui: &mut egui::Ui) {
                 });
                 ui.label(&entry.url);
                 if ui.button("Download").clicked() {
-                    start_indexes.push(index);
+                    start_ids.push(entry.id);
                 }
                 if ui.button("Remove").clicked() {
-                    remove_index = Some(index);
+                    remove_id = Some(entry.id);
                 }
             });
             if !entry.error.is_empty() {
@@ -45,10 +51,17 @@ pub(super) fn show(app: &mut App, ui: &mut egui::Ui) {
             });
         });
     }
-    if let Some(index) = remove_index {
-        app.staging.remove(index);
+    if let Some(id) = remove_id {
+        if let Some(index) = app.staging.iter().position(|entry| entry.id == id) {
+            app.staging.remove(index);
+        }
     }
-    for index in start_indexes.into_iter().rev() {
-        app.start_download(index);
+    if download_all {
+        start_ids = app.staging.iter().map(|entry| entry.id).collect();
+    }
+    for id in start_ids {
+        if let Some(index) = app.staging.iter().position(|entry| entry.id == id) {
+            app.start_download(index);
+        }
     }
 }

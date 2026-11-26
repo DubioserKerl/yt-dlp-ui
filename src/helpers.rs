@@ -3,7 +3,8 @@ use eframe::egui;
 use std::{
     collections::BTreeMap,
     io::{BufRead, BufReader, Read},
-    sync::mpsc::Sender,
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex, mpsc::Sender},
     thread,
 };
 
@@ -107,12 +108,86 @@ fn setting_editor(ui: &mut egui::Ui, value: &mut String, spec: &Spec) {
     }
 }
 
-pub(crate) fn pump<R: Read + Send + 'static>(stream: R, tx: Sender<crate::model::Event>, id: u64) {
+#[derive(Clone)]
+pub(crate) struct OutputFile {
+    path: PathBuf,
+    existed_before_download: bool,
+}
+
+pub(crate) fn pump_output<R: Read + Send + 'static>(
+    stream: R,
+    tx: Sender<crate::model::Event>,
+    id: u64,
+    output_files: Arc<Mutex<Vec<OutputFile>>>,
+) -> thread::JoinHandle<()> {
     thread::spawn(move || {
         for line in BufReader::new(stream).lines().flatten() {
+            if let Some(path) = destination_from_line(&line) {
+                let existed_before_download = path.exists();
+                if let Ok(mut files) = output_files.lock() {
+                    if !files.iter().any(|file| file.path == path) {
+                        files.push(OutputFile {
+                            path,
+                            existed_before_download,
+                        });
+                    }
+                }
+            }
             let _ = tx.send(crate::model::Event::Line(id, line));
         }
-    });
+    })
+}
+
+fn destination_from_line(line: &str) -> Option<PathBuf> {
+    let (_, destination) = line.split_once("Destination:")?;
+    let destination = destination.trim();
+    (!destination.is_empty()).then(|| PathBuf::from(destination))
+}
+
+pub(crate) fn cleanup_partial_files(output_files: &[OutputFile], no_part: bool) -> Vec<String> {
+    let mut failures = Vec::new();
+    for output in output_files {
+        let mut partial = output.path.as_os_str().to_os_string();
+        partial.push(".part");
+        remove_file_if_present(Path::new(&partial), &mut failures);
+
+        let mut state_file = output.path.as_os_str().to_os_string();
+        state_file.push(".ytdl");
+        remove_file_if_present(Path::new(&state_file), &mut failures);
+
+        if let Some(filename) = output.path.file_name() {
+            let parent = output
+                .path
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+                .unwrap_or_else(|| Path::new("."));
+            let fragment_prefix = format!("{}.part-Frag", filename.to_string_lossy());
+            if let Ok(entries) = std::fs::read_dir(parent) {
+                for entry in entries.flatten() {
+                    if entry
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with(&fragment_prefix)
+                    {
+                        remove_file_if_present(&entry.path(), &mut failures);
+                    }
+                }
+            }
+        }
+
+        if no_part && !output.existed_before_download {
+            remove_file_if_present(&output.path, &mut failures);
+        }
+    }
+    failures
+}
+
+fn remove_file_if_present(path: &Path, failures: &mut Vec<String>) {
+    match std::fs::remove_file(path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => failures.push(format!("{}: {error}", path.display())),
+    }
 }
 
 pub(crate) fn is_youtube_url(value: &str) -> bool {
