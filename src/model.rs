@@ -29,6 +29,8 @@ impl Default for Config {
             ("date_before", ""),
             ("playlist_items", ""),
             ("sponsorblock", ""),
+            ("sponsorblock_remove", ""),
+            ("ffmpeg_location", ""),
             ("write_subs", "false"),
             ("write_auto_subs", "false"),
             ("embed_subs", "false"),
@@ -39,6 +41,9 @@ impl Default for Config {
             ("ignore_errors", "false"),
             ("continue", "true"),
             ("playlist", "true"),
+            ("windows_filenames", "false"),
+            ("no_part", "false"),
+            ("embed_chapters", "false"),
         ] {
             settings.insert(key.into(), value.into());
         }
@@ -183,6 +188,20 @@ pub(crate) const SPECS: &[Spec] = &[
         help: "For example all or sponsor,intro",
     },
     Spec {
+        key: "sponsorblock_remove",
+        label: "Remove SponsorBlock categories",
+        flag: "--sponsorblock-remove",
+        kind: Kind::Text,
+        help: "For example sponsor,selfpromo,interaction",
+    },
+    Spec {
+        key: "ffmpeg_location",
+        label: "FFmpeg location",
+        flag: "--ffmpeg-location",
+        kind: Kind::Path,
+        help: "FFmpeg executable or its containing directory",
+    },
+    Spec {
         key: "write_subs",
         label: "Write subtitles",
         flag: "--write-subs",
@@ -202,6 +221,13 @@ pub(crate) const SPECS: &[Spec] = &[
         flag: "--embed-subs",
         kind: Kind::Bool,
         help: "Embed downloaded subtitles",
+    },
+    Spec {
+        key: "embed_chapters",
+        label: "Embed chapters",
+        flag: "--embed-chapters",
+        kind: Kind::Bool,
+        help: "Write video chapters as embedded chapters",
     },
     Spec {
         key: "extract_audio",
@@ -251,6 +277,20 @@ pub(crate) const SPECS: &[Spec] = &[
         flag: "--yes-playlist",
         kind: Kind::Bool,
         help: "Allow playlist URLs to download the playlist",
+    },
+    Spec {
+        key: "windows_filenames",
+        label: "Windows-safe filenames",
+        flag: "--windows-filenames",
+        kind: Kind::Bool,
+        help: "Replace characters that are invalid in Windows filenames",
+    },
+    Spec {
+        key: "no_part",
+        label: "Disable .part files",
+        flag: "--no-part",
+        kind: Kind::Bool,
+        help: "Write downloads directly to the destination filename",
     },
 ];
 

@@ -42,4 +42,20 @@ pub(super) fn show(app: &mut App, ui: &mut egui::Ui) {
             app.export_command();
         }
     });
+
+    if let Some(error) = app.command_error.clone() {
+        let mut dismiss = false;
+        egui::Modal::new(egui::Id::new("command_line_import_error")).show(ui.ctx(), |ui| {
+            ui.set_min_width(360.0);
+            ui.heading("Could not import command line");
+            ui.label(error);
+            ui.add_space(8.0);
+            if ui.button("OK").clicked() {
+                dismiss = true;
+            }
+        });
+        if dismiss {
+            app.command_error = None;
+        }
+    }
 }

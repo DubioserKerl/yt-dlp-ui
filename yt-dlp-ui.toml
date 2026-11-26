@@ -1,0 +1,35 @@
+executable = 'C:\Users\mail\Videos\yt-dlp.exe'
+extra_args = ""
+
+[settings]
+audio_format = "mp3"
+audio_quality = "0"
+continue = "true"
+cookies = 'C:\Users\mail\Videos\cookies.txt'
+date_after = ""
+date_before = ""
+download_archive = 'C:\Users\mail\Documents\archive.log'
+embed_chapters = "true"
+embed_metadata = "true"
+embed_subs = "true"
+embed_thumbnail = "false"
+extract_audio = "false"
+ffmpeg_location = 'V:\ffmpeg\bin\'
+format = "bestvideo+bestaudio/best"
+fragment_retries = "10"
+ignore_errors = "false"
+no_part = "true"
+no_warnings = "false"
+output = "%(title)s.%(ext)s"
+paths = 'C:\Users\mail\Videos'
+playlist = "false"
+playlist_items = ""
+proxy = ""
+rate_limit = ""
+retries = "10"
+sponsorblock = "all"
+sponsorblock_remove = "sponsor,selfpromo,interaction"
+sub_langs = "en.*,de.*"
+windows_filenames = "true"
+write_auto_subs = "false"
+write_subs = "false"

@@ -1,5 +1,5 @@
 use crate::{
-    helpers::{canonical, is_youtube_url, pump},
+    helpers::{canonical, is_youtube_url, parse_command_line, pump},
     model::{Config, Entry, Event, Page, SPECS},
     pages,
 };
@@ -25,6 +25,7 @@ pub(crate) struct App {
     next_clip_poll: Instant,
     pub(crate) notice: String,
     pub(crate) command_text: String,
+    pub(crate) command_error: Option<String>,
 }
 
 impl App {
@@ -48,6 +49,7 @@ impl App {
             next_clip_poll: Instant::now(),
             notice: String::new(),
             command_text: String::new(),
+            command_error: None,
         }
     }
 
@@ -176,10 +178,11 @@ impl App {
     }
 
     pub(crate) fn import_command(&mut self) {
-        let parts = match shell_words::split(&self.command_text) {
+        self.command_error = None;
+        let parts = match parse_command_line(&self.command_text) {
             Ok(parts) => parts,
             Err(error) => {
-                self.notice = format!("Could not parse command: {error}");
+                self.command_error = Some(error);
                 return;
             }
         };
@@ -203,11 +206,15 @@ impl App {
                         self.config
                             .settings
                             .insert(spec.key.into(), enabled.to_string());
-                    } else if index + 1 < parts.len() {
+                    } else if index + 1 < parts.len() && !parts[index + 1].starts_with('-') {
                         index += 1;
                         self.config
                             .settings
                             .insert(spec.key.into(), parts[index].clone());
+                    } else {
+                        self.command_error =
+                            Some(format!("The option {} requires a value.", spec.flag));
+                        return;
                     }
                 } else {
                     let mut extra = part.clone();
@@ -276,20 +283,18 @@ impl App {
             .settings
             .iter()
             .filter_map(|(key, value)| {
-                SPECS
-                    .iter()
-                    .find(|spec| spec.key == key)
-                    .map(|spec| (spec, value))
-            })
-            .filter(|(spec, value)| {
-                !value.is_empty()
-                    && (!matches!(spec.kind, crate::model::Kind::Bool) || *value == "true")
-            })
-            .map(|(spec, value)| {
+                let spec = SPECS.iter().find(|spec| spec.key == key)?;
                 if matches!(spec.kind, crate::model::Kind::Bool) {
-                    spec.flag.to_string()
+                    match (spec.key, value.as_str()) {
+                        ("playlist", "false") => Some("--no-playlist".to_string()),
+                        ("continue", "false") => Some("--no-continue".to_string()),
+                        (_, "true") => Some(spec.flag.to_string()),
+                        _ => None,
+                    }
+                } else if value.is_empty() {
+                    None
                 } else {
-                    format!("{} {}", spec.flag, shell_words::quote(value))
+                    Some(format!("{} {}", spec.flag, shell_words::quote(value)))
                 }
             })
             .collect::<Vec<_>>()
@@ -391,11 +396,15 @@ impl eframe::App for App {
         });
 
         egui::CentralPanel::default().show(context, |ui| {
-            if !self.notice.is_empty() {
-                ui.label(&self.notice);
-            }
-            let page = self.page.clone();
-            pages::show(self, &page, ui);
+            egui::ScrollArea::both()
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    if !self.notice.is_empty() {
+                        ui.label(&self.notice);
+                    }
+                    let page = self.page.clone();
+                    pages::show(self, &page, ui);
+                });
         });
         context.request_repaint_after(Duration::from_millis(300));
     }
@@ -404,9 +413,23 @@ impl eframe::App for App {
 pub(crate) fn run() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1100.0, 760.0])
-            .with_min_inner_size([760.0, 560.0]),
+            .with_inner_size([1280.0, 900.0])
+            .with_min_inner_size([820.0, 600.0])
+            .with_resizable(true)
+            .with_icon(window_icon()),
         ..Default::default()
     };
     eframe::run_native("yt-dlp UI", options, Box::new(|_| Ok(Box::new(App::new()))))
+}
+
+fn window_icon() -> egui::IconData {
+    let image = image::load_from_memory(include_bytes!("../resources/yt-dlp-ui.png"))
+        .expect("the embedded application icon must be a valid PNG")
+        .into_rgba8();
+    let (width, height) = image.dimensions();
+    egui::IconData {
+        rgba: image.into_raw(),
+        width,
+        height,
+    }
 }

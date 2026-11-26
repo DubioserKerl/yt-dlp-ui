@@ -6,7 +6,11 @@ edition = "2024"
 [dependencies]
 arboard = "3.4"
 eframe = { version = "0.31", features = ["default_fonts"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
 rfd = "0.15"
 serde = { version = "1", features = ["derive"] }
 shell-words = "1"
 toml = "0.8"
+
+[build-dependencies]
+winresource = "0.1"

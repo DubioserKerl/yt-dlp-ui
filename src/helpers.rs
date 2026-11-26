@@ -148,6 +148,72 @@ pub(crate) fn canonical(url: &str) -> String {
     url.trim_end_matches('/').to_lowercase()
 }
 
+pub(crate) fn parse_command_line(command: &str) -> Result<Vec<String>, String> {
+    let command = strip_outer_quotes(command.trim());
+    let mut arguments = Vec::new();
+    let mut current = String::new();
+    let mut quote = None;
+    let mut token_started = false;
+
+    for character in command.chars() {
+        match (quote, character) {
+            (Some(active), character) if active == character => quote = None,
+            (Some('\''), _) | (Some('"'), _) => current.push(character),
+            (Some(_), character) => current.push(character),
+            (None, '\'' | '"') => {
+                quote = Some(character);
+                token_started = true;
+            }
+            (None, character) if character.is_whitespace() => {
+                if token_started {
+                    arguments.push(std::mem::take(&mut current));
+                    token_started = false;
+                }
+            }
+            (None, character) => {
+                current.push(character);
+                token_started = true;
+            }
+        }
+    }
+
+    if let Some(active_quote) = quote {
+        let kind = if active_quote == '\'' {
+            "single"
+        } else {
+            "double"
+        };
+        return Err(format!("Unterminated {kind} quote in command line."));
+    }
+    if token_started {
+        arguments.push(current);
+    }
+    if arguments.is_empty() {
+        return Err("Enter a yt-dlp command line to import.".into());
+    }
+    Ok(arguments)
+}
+
+fn strip_outer_quotes(command: &str) -> &str {
+    let Some(outer_quote) = command.chars().next() else {
+        return command;
+    };
+    if !matches!(outer_quote, '\'' | '"') || command.chars().last() != Some(outer_quote) {
+        return command;
+    }
+    if command
+        .chars()
+        .skip(1)
+        .take_while(|character| *character != outer_quote)
+        .count()
+        == command.chars().count().saturating_sub(2)
+    {
+        &command[outer_quote.len_utf8()..command.len() - outer_quote.len_utf8()]
+    } else {
+        command
+    }
+}
+
 pub(crate) fn progress_fraction(progress: &str) -> f32 {
     if let Some(percent_index) = progress.find('%') {
         let start = progress[..percent_index]

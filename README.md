@@ -2,6 +2,8 @@
 
 A small Rust desktop front end for an existing `yt-dlp` executable.
 
+![yt-dlp UI application icon](resources/yt-dlp-ui.png)
+
 ## Run
 
 Install Rust, then run:
@@ -21,6 +23,8 @@ On the **Options** page, set the path to `yt-dlp` or `yt-dlp.exe` if it is not o
 - The command line field imports recognized yt-dlp options into typed settings, stages YouTube URLs, and keeps unrecognized flags in Additional arguments. Export builds a reusable command line from the baseline.
 
 The UI exposes common format, output, path, audio, subtitle, retry, proxy, cookie, playlist, date, and SponsorBlock options. Additional yt-dlp flags remain available through the Additional arguments field.
+
+The window opens at 1280 × 900 and can be resized. Page content scrolls in both directions when it does not fit the available space. The application icon is available as SVG, PNG, and multi-resolution ICO under `resources/`; Windows builds embed the ICO in the executable.
 
 ## Project guide
 
