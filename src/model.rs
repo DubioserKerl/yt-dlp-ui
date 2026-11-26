@@ -7,6 +7,7 @@ pub(crate) struct Config {
     pub(crate) executable: String,
     pub(crate) settings: BTreeMap<String, String>,
     pub(crate) extra_args: String,
+    pub(crate) notifications_enabled: bool,
     pub(crate) notification_display_seconds: u32,
     pub(crate) notification_color_scheme: String,
 }
@@ -65,6 +66,7 @@ impl Default for Config {
             executable: "yt-dlp".into(),
             settings,
             extra_args: String::new(),
+            notifications_enabled: true,
             notification_display_seconds: 6,
             notification_color_scheme: "Blue".into(),
         }
@@ -507,6 +509,8 @@ pub(crate) struct Entry {
     pub(crate) already_in_history: bool,
     #[serde(default)]
     pub(crate) completed_at: i64,
+    #[serde(default)]
+    pub(crate) download_progress: f32,
     pub(crate) url: String,
     pub(crate) status: String,
     pub(crate) progress: String,

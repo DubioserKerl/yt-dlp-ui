@@ -1,4 +1,4 @@
-use crate::{app::App, helpers::progress_fraction};
+use crate::app::App;
 use eframe::egui;
 
 pub(super) fn show(app: &mut App, ui: &mut egui::Ui) {
@@ -28,9 +28,12 @@ pub(super) fn show(app: &mut App, ui: &mut egui::Ui) {
                 ui.label("Waiting for the previous download to finish");
             } else {
                 ui.add(
-                    egui::ProgressBar::new(progress_fraction(&entry.progress))
-                        .text(&entry.progress),
+                    egui::ProgressBar::new(entry.download_progress)
+                        .text(format!("{:.0}% overall", entry.download_progress * 100.0)),
                 );
+                if !entry.progress.contains('%') && !entry.progress.is_empty() {
+                    ui.weak(&entry.progress);
+                }
             }
         });
     }

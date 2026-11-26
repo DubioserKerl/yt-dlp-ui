@@ -8,6 +8,16 @@ pub(super) fn show(app: &mut App, ui: &mut egui::Ui) {
     ui.heading("Options");
     ui.group(|ui| {
         ui.heading("Notifications");
+        let mut notifications_enabled = app.config.notifications_enabled;
+        if ui
+            .checkbox(&mut notifications_enabled, "Enable notifications")
+            .changed()
+        {
+            app.config.notifications_enabled = notifications_enabled;
+            if !notifications_enabled {
+                app.dismiss_notifications();
+            }
+        }
         ui.horizontal(|ui| {
             ui.label("Display time (seconds)");
             ui.add(
