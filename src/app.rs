@@ -8,6 +8,33 @@ use crate::{
 };
 
 const HISTORY_FILE: &str = "yt-dlp-ui-history.toml";
+const STAGING_FILE: &str = "yt-dlp-ui-staging.toml";
+
+fn restore_staging() -> (Vec<Entry>, String) {
+    match std::fs::read_to_string(STAGING_FILE) {
+        Ok(contents) => match toml::from_str::<HistoryFile>(&contents) {
+            Ok(saved) => (saved.entries, String::new()),
+            Err(error) => (
+                Vec::new(),
+                format!("Could not read saved download staging: {error}"),
+            ),
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => (Vec::new(), String::new()),
+        Err(error) => (
+            Vec::new(),
+            format!("Could not read saved download staging: {error}"),
+        ),
+    }
+}
+
+fn persist_staging(staging: &[Entry]) -> std::io::Result<()> {
+    let file = HistoryFile {
+        entries: staging.to_vec(),
+    };
+    let contents =
+        toml::to_string_pretty(&file).map_err(|error| std::io::Error::other(error.to_string()))?;
+    std::fs::write(STAGING_FILE, contents)
+}
 
 fn restore_history(config: &Config) -> (Vec<Entry>, u64, String) {
     let mut notice = String::new();
@@ -115,6 +142,7 @@ use std::{
 pub(crate) struct App {
     pub(crate) config: Config,
     pub(crate) staging: Vec<Entry>,
+    staging_snapshot: Vec<Entry>,
     pub(crate) downloads: Vec<Entry>,
     pub(crate) history: Vec<Entry>,
     pub(crate) format_states: HashMap<u64, FormatState>,
@@ -138,10 +166,24 @@ impl App {
             .and_then(|contents| toml::from_str(&contents).ok())
             .unwrap_or_default();
         let (history, next_id, notice) = restore_history(&config);
+        let (staging, staging_notice) = restore_staging();
+        let next_id = staging
+            .iter()
+            .map(|entry| entry.id)
+            .max()
+            .unwrap_or_default()
+            .saturating_add(1)
+            .max(next_id);
+        let notice = if staging_notice.is_empty() {
+            notice
+        } else {
+            staging_notice
+        };
         let (tx, rx) = mpsc::channel();
         Self {
             config,
-            staging: Vec::new(),
+            staging_snapshot: staging.clone(),
+            staging,
             downloads: Vec::new(),
             history,
             format_states: HashMap::new(),
@@ -164,20 +206,24 @@ impl App {
             return;
         }
         let clean = url.trim().trim_end_matches('/').to_string();
-        let duplicate = self
+        let duplicate_in_progress = self
             .staging
             .iter()
             .chain(&self.downloads)
-            .chain(&self.history)
             .any(|entry| canonical(&entry.url) == canonical(&clean));
-        if duplicate {
-            self.notice = format!("Already added or downloaded: {clean}");
+        if duplicate_in_progress {
+            self.notice = format!("Already in staging or downloads: {clean}");
             return;
         }
 
+        let already_in_history = self
+            .history
+            .iter()
+            .any(|entry| canonical(&entry.url) == canonical(&clean));
+
         self.staging.push(Entry {
             id: self.next_id,
-            url: clean,
+            url: clean.clone(),
             status: "Ready".into(),
             progress: String::new(),
             error: String::new(),
@@ -185,6 +231,9 @@ impl App {
             extra_args: String::new(),
         });
         self.next_id += 1;
+        if already_in_history {
+            self.notice = format!("Added to staging; this link is already in history: {clean}");
+        }
     }
 
     pub(crate) fn save_config(&mut self) {
@@ -200,6 +249,16 @@ impl App {
     fn save_history(&mut self) {
         if let Err(error) = persist_history(&self.history) {
             self.notice = format!("Download finished, but history could not be saved: {error}");
+        }
+    }
+
+    fn save_staging_if_changed(&mut self) {
+        if self.staging == self.staging_snapshot {
+            return;
+        }
+        match persist_staging(&self.staging) {
+            Ok(()) => self.staging_snapshot.clone_from(&self.staging),
+            Err(error) => self.notice = format!("Could not save download staging: {error}"),
         }
     }
 
@@ -730,6 +789,7 @@ impl eframe::App for App {
                     pages::show(self, &page, ui);
                 });
         });
+        self.save_staging_if_changed();
         context.request_repaint_after(Duration::from_millis(300));
     }
 }

@@ -384,7 +384,7 @@ pub(crate) const SPECS: &[Spec] = &[
     },
 ];
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct Entry {
     pub(crate) id: u64,
     pub(crate) url: String,
