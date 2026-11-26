@@ -1,7 +1,7 @@
 use crate::{
     helpers::{
-        canonical, cleanup_partial_files, is_youtube_url, parse_command_line, parse_format_list,
-        pump_output,
+        canonical, cleanup_partial_files, is_youtube_url, normalize_staging_url,
+        parse_command_line, parse_format_list, pump_output,
     },
     model::{Config, Entry, Event, FormatState, HistoryFile, Page, SPECS},
     pages,
@@ -166,7 +166,24 @@ impl App {
             .and_then(|contents| toml::from_str(&contents).ok())
             .unwrap_or_default();
         let (history, next_id, notice) = restore_history(&config);
-        let (staging, staging_notice) = restore_staging();
+        let (mut staging, staging_notice) = restore_staging();
+        let staging_snapshot = staging.clone();
+        let mut normalized_staging = Vec::<Entry>::new();
+        for mut entry in staging.drain(..) {
+            entry.url = normalize_staging_url(&entry.url);
+            if let Some(existing) = normalized_staging
+                .iter_mut()
+                .find(|existing| canonical(&existing.url) == canonical(&entry.url))
+            {
+                existing.overrides.extend(entry.overrides);
+                if existing.extra_args.is_empty() {
+                    existing.extra_args = entry.extra_args;
+                }
+            } else {
+                normalized_staging.push(entry);
+            }
+        }
+        let staging = normalized_staging;
         let next_id = staging
             .iter()
             .map(|entry| entry.id)
@@ -182,7 +199,7 @@ impl App {
         let (tx, rx) = mpsc::channel();
         Self {
             config,
-            staging_snapshot: staging.clone(),
+            staging_snapshot,
             staging,
             downloads: Vec::new(),
             history,
@@ -205,7 +222,7 @@ impl App {
         if !is_youtube_url(url) {
             return;
         }
-        let clean = url.trim().trim_end_matches('/').to_string();
+        let clean = normalize_staging_url(url);
         let duplicate_in_progress = self
             .staging
             .iter()

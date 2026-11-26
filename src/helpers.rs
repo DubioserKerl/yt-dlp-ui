@@ -381,6 +381,33 @@ pub(crate) fn canonical(url: &str) -> String {
     url.trim_end_matches('/').to_lowercase()
 }
 
+pub(crate) fn normalize_staging_url(url: &str) -> String {
+    let url = url.trim().trim_end_matches('/');
+    let without_fragment = url.split('#').next().unwrap_or(url);
+    let Some((base, query)) = without_fragment.split_once('?') else {
+        return without_fragment.to_string();
+    };
+
+    let parameters: Vec<_> = query.split('&').collect();
+    if let Some(video_id) = parameters.iter().find_map(|parameter| {
+        let (key, value) = parameter.split_once('=')?;
+        (key == "v" && !value.is_empty()).then_some(value)
+    }) {
+        return format!("{base}?v={video_id}");
+    }
+
+    if base.contains("/playlist") {
+        if let Some(playlist_id) = parameters.iter().find_map(|parameter| {
+            let (key, value) = parameter.split_once('=')?;
+            (key == "list" && !value.is_empty()).then_some(value)
+        }) {
+            return format!("{base}?list={playlist_id}");
+        }
+    }
+
+    base.to_string()
+}
+
 pub(crate) fn parse_command_line(command: &str) -> Result<Vec<String>, String> {
     let command = strip_outer_quotes(command.trim());
     let mut arguments = Vec::new();
