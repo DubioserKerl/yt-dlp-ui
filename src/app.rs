@@ -360,21 +360,19 @@ impl App {
             "never".to_string(),
             "-F".to_string(),
         ];
-        for key in ["proxy", "cookies"] {
+        for (key, flag) in [
+            ("proxy", "--proxy"),
+            ("cookies", "--cookies"),
+            ("cookies_from_browser", "--cookies-from-browser"),
+            ("socket_timeout", "--socket-timeout"),
+        ] {
             let value = entry
                 .overrides
                 .get(key)
                 .or_else(|| self.config.settings.get(key))
                 .filter(|value| !value.is_empty());
             if let Some(value) = value {
-                args.push(
-                    if key == "proxy" {
-                        "--proxy"
-                    } else {
-                        "--cookies"
-                    }
-                    .into(),
-                );
+                args.push(flag.into());
                 args.push(value.clone());
             }
         }
@@ -521,10 +519,20 @@ impl App {
                     spec.flag == part
                         || (spec.key == "playlist" && part == "--no-playlist")
                         || (spec.key == "continue" && part == "--no-continue")
+                        || (spec.key == "write_thumbnail" && part == "--no-write-thumbnail")
+                        || (spec.key == "write_info_json" && part == "--no-write-info-json")
+                        || (spec.key == "write_description" && part == "--no-write-description")
                 });
                 if let Some(spec) = spec {
                     if matches!(spec.kind, crate::model::Kind::Bool) {
-                        let enabled = part != "--no-playlist" && part != "--no-continue";
+                        let enabled = !matches!(
+                            part.as_str(),
+                            "--no-playlist"
+                                | "--no-continue"
+                                | "--no-write-thumbnail"
+                                | "--no-write-info-json"
+                                | "--no-write-description"
+                        );
                         self.config
                             .settings
                             .insert(spec.key.into(), enabled.to_string());

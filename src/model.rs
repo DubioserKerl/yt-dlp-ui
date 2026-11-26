@@ -23,12 +23,20 @@ impl Default for Config {
             ("rate_limit", ""),
             ("retries", "10"),
             ("fragment_retries", "10"),
+            ("concurrent_fragments", "1"),
+            ("retry_sleep", ""),
             ("proxy", ""),
+            ("socket_timeout", ""),
             ("cookies", ""),
+            ("cookies_from_browser", ""),
             ("sub_langs", "en.*"),
             ("date_after", ""),
             ("date_before", ""),
             ("playlist_items", ""),
+            ("download_sections", ""),
+            ("match_filters", ""),
+            ("min_filesize", ""),
+            ("max_filesize", ""),
             ("sponsorblock", ""),
             ("sponsorblock_remove", ""),
             ("ffmpeg_location", ""),
@@ -38,6 +46,9 @@ impl Default for Config {
             ("extract_audio", "false"),
             ("embed_metadata", "true"),
             ("embed_thumbnail", "false"),
+            ("write_thumbnail", "false"),
+            ("write_info_json", "false"),
+            ("write_description", "false"),
             ("no_warnings", "false"),
             ("ignore_errors", "false"),
             ("continue", "true"),
@@ -132,7 +143,7 @@ impl Spec {
     pub(crate) fn category(&self) -> OptionCategory {
         match self.key {
             "ignore_errors" => OptionCategory::General,
-            "proxy" => OptionCategory::Network,
+            "proxy" | "socket_timeout" => OptionCategory::Network,
             "date_after"
             | "date_before"
             | "playlist_items"
@@ -141,15 +152,37 @@ impl Spec {
             | "sponsorblock"
             | "sponsorblock_remove"
             | "format"
-            | "remux_video" => OptionCategory::VideoSelection,
-            "output" | "paths" | "cookies" | "continue" | "no_part" | "windows_filenames" => {
-                OptionCategory::Filesystem
-            }
-            "embed_thumbnail" => OptionCategory::Thumbnail,
+            | "remux_video"
+            | "download_sections"
+            | "match_filters"
+            | "min_filesize"
+            | "max_filesize" => OptionCategory::VideoSelection,
+            "output"
+            | "paths"
+            | "cookies"
+            | "cookies_from_browser"
+            | "write_info_json"
+            | "write_description"
+            | "continue"
+            | "no_part"
+            | "windows_filenames" => OptionCategory::Filesystem,
+            "embed_thumbnail" | "write_thumbnail" => OptionCategory::Thumbnail,
             "no_warnings" => OptionCategory::Verbosity,
-            "audio_format" | "audio_quality" | "rate_limit" | "retries" | "fragment_retries"
-            | "sub_langs" | "write_subs" | "write_auto_subs" | "embed_subs" | "embed_chapters"
-            | "extract_audio" | "embed_metadata" | "ffmpeg_location" => OptionCategory::Download,
+            "audio_format"
+            | "audio_quality"
+            | "rate_limit"
+            | "retries"
+            | "fragment_retries"
+            | "concurrent_fragments"
+            | "retry_sleep"
+            | "sub_langs"
+            | "write_subs"
+            | "write_auto_subs"
+            | "embed_subs"
+            | "embed_chapters"
+            | "extract_audio"
+            | "embed_metadata"
+            | "ffmpeg_location" => OptionCategory::Download,
             _ => OptionCategory::Download,
         }
     }
@@ -229,6 +262,20 @@ pub(crate) const SPECS: &[Spec] = &[
         help: "Retry count for media fragments",
     },
     Spec {
+        key: "concurrent_fragments",
+        label: "Concurrent fragments",
+        flag: "--concurrent-fragments",
+        kind: Kind::Number,
+        help: "Parallel downloads for DASH/HLS fragments; increase to improve speed",
+    },
+    Spec {
+        key: "retry_sleep",
+        label: "Retry delay",
+        flag: "--retry-sleep",
+        kind: Kind::Text,
+        help: "Delay between retries, e.g. 5 or linear=1::2",
+    },
+    Spec {
         key: "proxy",
         label: "Proxy URL",
         flag: "--proxy",
@@ -236,11 +283,25 @@ pub(crate) const SPECS: &[Spec] = &[
         help: "HTTP, HTTPS, SOCKS or empty for direct",
     },
     Spec {
+        key: "socket_timeout",
+        label: "Network timeout (seconds)",
+        flag: "--socket-timeout",
+        kind: Kind::Number,
+        help: "Time to wait for a network response before giving up",
+    },
+    Spec {
         key: "cookies",
         label: "Cookies file",
         flag: "--cookies",
         kind: Kind::Path,
         help: "Netscape-format cookies file",
+    },
+    Spec {
+        key: "cookies_from_browser",
+        label: "Cookies from browser",
+        flag: "--cookies-from-browser",
+        kind: Kind::Text,
+        help: "Browser and optional profile, e.g. firefox or chrome:Profile 1",
     },
     Spec {
         key: "sub_langs",
@@ -269,6 +330,34 @@ pub(crate) const SPECS: &[Spec] = &[
         flag: "--playlist-items",
         kind: Kind::Text,
         help: "For example 1,2,5-8",
+    },
+    Spec {
+        key: "download_sections",
+        label: "Download sections",
+        flag: "--download-sections",
+        kind: Kind::Text,
+        help: "Chapter name or time range, e.g. *10:15-12:30 or intro",
+    },
+    Spec {
+        key: "match_filters",
+        label: "Video match filter",
+        flag: "--match-filters",
+        kind: Kind::Text,
+        help: "Metadata expression, e.g. duration<3600 or !is_live",
+    },
+    Spec {
+        key: "min_filesize",
+        label: "Minimum file size",
+        flag: "--min-filesize",
+        kind: Kind::Text,
+        help: "Skip smaller files, e.g. 50k or 1M",
+    },
+    Spec {
+        key: "max_filesize",
+        label: "Maximum file size",
+        flag: "--max-filesize",
+        kind: Kind::Text,
+        help: "Skip larger files, e.g. 500M or 2G",
     },
     Spec {
         key: "sponsorblock",
@@ -339,6 +428,27 @@ pub(crate) const SPECS: &[Spec] = &[
         flag: "--embed-thumbnail",
         kind: Kind::Bool,
         help: "Add thumbnail to media files",
+    },
+    Spec {
+        key: "write_thumbnail",
+        label: "Save thumbnail",
+        flag: "--write-thumbnail",
+        kind: Kind::Bool,
+        help: "Save the thumbnail image beside the downloaded media",
+    },
+    Spec {
+        key: "write_info_json",
+        label: "Save info JSON",
+        flag: "--write-info-json",
+        kind: Kind::Bool,
+        help: "Save extracted video metadata in a .info.json file",
+    },
+    Spec {
+        key: "write_description",
+        label: "Save description",
+        flag: "--write-description",
+        kind: Kind::Bool,
+        help: "Save the video description in a .description file",
     },
     Spec {
         key: "no_warnings",
