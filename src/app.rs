@@ -397,9 +397,7 @@ impl App {
             }
 
             let (cancelled, status) = wait_for_process(&mut child, cancel_rx);
-            for reader in readers {
-                let _ = reader.join();
-            }
+            finish_output_readers(readers, Duration::from_millis(500));
 
             let result = if cancelled {
                 let files = output_files
@@ -649,13 +647,41 @@ fn wait_for_process(
 ) -> (bool, std::io::Result<std::process::ExitStatus>) {
     loop {
         if cancel.try_recv().is_ok() {
-            let _ = child.kill();
+            terminate_process_tree(child);
             return (true, child.wait());
         }
         match child.try_wait() {
             Ok(Some(status)) => return (false, Ok(status)),
             Ok(None) => thread::sleep(Duration::from_millis(40)),
             Err(error) => return (false, Err(error)),
+        }
+    }
+}
+
+fn terminate_process_tree(child: &mut Child) {
+    #[cfg(windows)]
+    {
+        let pid = child.id().to_string();
+        let mut command = Command::new("taskkill");
+        command
+            .args(["/PID", &pid, "/T", "/F"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        configure_hidden_console(&mut command);
+        let _ = command.status();
+    }
+
+    let _ = child.kill();
+}
+
+fn finish_output_readers(readers: Vec<thread::JoinHandle<()>>, timeout: Duration) {
+    let deadline = Instant::now() + timeout;
+    for reader in readers {
+        while !reader.is_finished() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        if reader.is_finished() {
+            let _ = reader.join();
         }
     }
 }
