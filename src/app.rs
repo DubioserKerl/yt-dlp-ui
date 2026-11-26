@@ -190,7 +190,7 @@ impl App {
             .ok()
             .and_then(|contents| toml::from_str(&contents).ok())
             .unwrap_or_default();
-        let (history, next_id, notice) = restore_history(&config);
+        let (mut history, next_id, notice) = restore_history(&config);
         let (mut staging, staging_notice) = restore_staging();
         let staging_snapshot = staging.clone();
         let mut normalized_staging = Vec::<Entry>::new();
@@ -208,7 +208,12 @@ impl App {
                 normalized_staging.push(entry);
             }
         }
-        let staging = normalized_staging;
+        let mut staging = normalized_staging;
+        for entry in staging.iter_mut().chain(&mut history) {
+            if entry.title.contains('\u{FFFD}') {
+                entry.title.clear();
+            }
+        }
         let next_id = staging
             .iter()
             .map(|entry| entry.id)
@@ -356,6 +361,7 @@ impl App {
                     command.args([flag, value]);
                 }
             }
+            command.args(["--encoding", "UTF-8"]);
             command.arg(&url);
             configure_hidden_console(&mut command);
             let title = match command.output() {
@@ -562,6 +568,7 @@ impl App {
         thread::spawn(move || {
             let mut command = Command::new(&executable);
             command
+                .args(["--encoding", "UTF-8"])
                 .args(&args)
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped());
@@ -613,7 +620,10 @@ impl App {
         self.downloads[index].status = "Starting…".into();
         let entry = self.downloads[index].clone();
         let id = entry.id;
-        let args = self.command_args(&entry);
+        let mut args = self.command_args(&entry);
+        let url = args.pop().unwrap_or_else(|| entry.url.clone());
+        args.extend(["--encoding".into(), "UTF-8".into()]);
+        args.push(url);
         let executable = self.config.executable.clone();
         let no_part = args.iter().any(|argument| argument == "--no-part");
         let tx = self.tx.clone();
