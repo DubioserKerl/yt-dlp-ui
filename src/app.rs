@@ -1,6 +1,9 @@
 use crate::{
-    helpers::{canonical, cleanup_partial_files, is_youtube_url, parse_command_line, pump_output},
-    model::{Config, Entry, Event, HistoryFile, Page, SPECS},
+    helpers::{
+        canonical, cleanup_partial_files, is_youtube_url, parse_command_line, parse_format_list,
+        pump_output,
+    },
+    model::{Config, Entry, Event, FormatState, HistoryFile, Page, SPECS},
     pages,
 };
 
@@ -99,6 +102,7 @@ fn persist_history(history: &[Entry]) -> std::io::Result<()> {
 }
 use eframe::egui;
 use std::{
+    collections::HashMap,
     process::{Child, Command, Stdio},
     sync::{
         Arc, Mutex,
@@ -113,6 +117,7 @@ pub(crate) struct App {
     pub(crate) staging: Vec<Entry>,
     pub(crate) downloads: Vec<Entry>,
     pub(crate) history: Vec<Entry>,
+    pub(crate) format_states: HashMap<u64, FormatState>,
     page: Page,
     next_id: u64,
     tx: Sender<Event>,
@@ -139,6 +144,7 @@ impl App {
             staging: Vec::new(),
             downloads: Vec::new(),
             history,
+            format_states: HashMap::new(),
             page: Page::Staging,
             next_id,
             tx,
@@ -242,6 +248,7 @@ impl App {
 
     pub(crate) fn start_download(&mut self, index: usize) {
         let mut entry = self.staging.remove(index);
+        self.format_states.remove(&entry.id);
         entry.status = "Queued".into();
         entry.progress.clear();
         entry.error.clear();
@@ -260,6 +267,82 @@ impl App {
             entry.status = "Cancelling…".into();
         }
         let _ = cancel.send(());
+    }
+
+    pub(crate) fn load_formats(&mut self, id: u64) {
+        if matches!(self.format_states.get(&id), Some(FormatState::Loading)) {
+            return;
+        }
+        let Some(entry) = self.staging.iter().find(|entry| entry.id == id) else {
+            return;
+        };
+        let url = entry.url.clone();
+        let executable = self.config.executable.clone();
+        let mut args = vec![
+            "--no-warnings".to_string(),
+            "--color".to_string(),
+            "never".to_string(),
+            "-F".to_string(),
+        ];
+        for key in ["proxy", "cookies"] {
+            let value = entry
+                .overrides
+                .get(key)
+                .or_else(|| self.config.settings.get(key))
+                .filter(|value| !value.is_empty());
+            if let Some(value) = value {
+                args.push(
+                    if key == "proxy" {
+                        "--proxy"
+                    } else {
+                        "--cookies"
+                    }
+                    .into(),
+                );
+                args.push(value.clone());
+            }
+        }
+        args.push(url);
+        self.format_states.insert(id, FormatState::Loading);
+        let tx = self.tx.clone();
+
+        thread::spawn(move || {
+            let mut command = Command::new(&executable);
+            command
+                .args(&args)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            configure_hidden_console(&mut command);
+            let result = match command.output() {
+                Ok(output) if output.status.success() => {
+                    let stdout = String::from_utf8_lossy(&output.stdout);
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    let combined_output = format!("{stdout}\n{stderr}");
+                    let formats = parse_format_list(&combined_output);
+                    if formats.is_empty() {
+                        Err(if combined_output.trim().is_empty() {
+                            "yt-dlp did not report any available formats.".into()
+                        } else {
+                            combined_output.trim().to_string()
+                        })
+                    } else {
+                        Ok(formats)
+                    }
+                }
+                Ok(output) => {
+                    let stdout = String::from_utf8_lossy(&output.stdout);
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    let combined_output = format!("{stdout}\n{stderr}");
+                    Err(if combined_output.trim().is_empty() {
+                        format!("yt-dlp exited with {}", output.status)
+                    } else {
+                        combined_output.trim().to_string()
+                    })
+                }
+                Err(error) => Err(format!("Could not start {executable}: {error}")),
+            };
+            let _ = tx.send(Event::Formats(id, result));
+        });
     }
 
     fn start_next_download(&mut self) {
@@ -291,12 +374,7 @@ impl App {
                 .args(&args)
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped());
-            #[cfg(windows)]
-            {
-                use std::os::windows::process::CommandExt;
-                const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-                command.creation_flags(CREATE_NO_WINDOW);
-            }
+            configure_hidden_console(&mut command);
 
             let mut child = match command.spawn() {
                 Ok(child) => child,
@@ -549,6 +627,17 @@ impl App {
                         self.start_next_download();
                     }
                 }
+                Event::Formats(id, result) => {
+                    if self.staging.iter().any(|entry| entry.id == id) {
+                        self.format_states.insert(
+                            id,
+                            match result {
+                                Ok(formats) => FormatState::Loaded(formats),
+                                Err(error) => FormatState::Failed(error),
+                            },
+                        );
+                    }
+                }
             }
         }
     }
@@ -569,6 +658,17 @@ fn wait_for_process(
             Err(error) => return (false, Err(error)),
         }
     }
+}
+
+fn configure_hidden_console(command: &mut Command) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    #[cfg(not(windows))]
+    let _ = command;
 }
 
 impl eframe::App for App {

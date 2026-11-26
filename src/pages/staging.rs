@@ -23,9 +23,16 @@ pub(super) fn show(app: &mut App, ui: &mut egui::Ui) {
     ui.separator();
 
     let baseline = app.config.settings.clone();
+    let format_states = &app.format_states;
     let mut remove_id = None;
     let mut start_ids = Vec::new();
+    let mut format_load_ids = Vec::new();
     for entry in app.staging.iter_mut() {
+        let format_state = format_states.get(&entry.id);
+        let available_formats = match format_state {
+            Some(crate::model::FormatState::Loaded(formats)) => formats.as_slice(),
+            _ => &[],
+        };
         ui.group(|ui| {
             ui.horizontal(|ui| {
                 ui.label(if entry.error.is_empty() {
@@ -40,24 +47,54 @@ pub(super) fn show(app: &mut App, ui: &mut egui::Ui) {
                 if ui.button("Remove").clicked() {
                     remove_id = Some(entry.id);
                 }
+                match format_state {
+                    Some(crate::model::FormatState::Loading) => {
+                        ui.spinner();
+                        ui.label("Loading formats…");
+                    }
+                    Some(crate::model::FormatState::Loaded(formats)) => {
+                        ui.label(format!("{} formats loaded", formats.len()));
+                        if ui.button("Reload formats").clicked() {
+                            format_load_ids.push(entry.id);
+                        }
+                    }
+                    Some(crate::model::FormatState::Failed(_)) | None => {
+                        if ui.button("Load formats").clicked() {
+                            format_load_ids.push(entry.id);
+                        }
+                    }
+                }
             });
+            if let Some(crate::model::FormatState::Failed(error)) = format_state {
+                ui.colored_label(egui::Color32::RED, error);
+            }
             if !entry.error.is_empty() {
                 ui.colored_label(egui::Color32::RED, &entry.error);
                 if ui.button("Show error").clicked() {
                     app.notice = entry.error.clone();
                 }
             }
-            ui.collapsing("Override arguments for this download", |ui| {
+            let override_section = ui.collapsing("Override arguments for this download", |ui| {
                 let scope = egui::Id::new(("download-overrides", entry.id));
-                render_overrides(ui, &mut entry.overrides, &baseline, scope);
+                render_overrides(
+                    ui,
+                    &mut entry.overrides,
+                    &baseline,
+                    scope,
+                    available_formats,
+                );
                 render_extra_args(ui, &mut entry.extra_args, scope, false);
             });
+            if override_section.body_returned.is_some() && format_state.is_none() {
+                format_load_ids.push(entry.id);
+            }
         });
     }
     if let Some(id) = remove_id {
         if let Some(index) = app.staging.iter().position(|entry| entry.id == id) {
             app.staging.remove(index);
         }
+        app.format_states.remove(&id);
     }
     if download_all {
         start_ids = app.staging.iter().map(|entry| entry.id).collect();
@@ -66,5 +103,8 @@ pub(super) fn show(app: &mut App, ui: &mut egui::Ui) {
         if let Some(index) = app.staging.iter().position(|entry| entry.id == id) {
             app.start_download(index);
         }
+    }
+    for id in format_load_ids {
+        app.load_formats(id);
     }
 }

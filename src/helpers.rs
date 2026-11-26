@@ -1,4 +1,4 @@
-use crate::model::{Config, Kind, OptionCategory, SPECS, Spec};
+use crate::model::{Config, Kind, OptionCategory, SPECS, Spec, VideoFormat};
 use eframe::egui;
 use std::{
     collections::BTreeMap,
@@ -23,7 +23,11 @@ pub(crate) fn render_specs(
         });
         ui.horizontal(|ui| {
             ui.add_sized([190.0, 22.0], egui::Label::new(spec.label));
-            setting_editor(ui, value, spec);
+            if spec.key == "format" {
+                render_format_selector(ui, value, &common_format_presets(), scope);
+            } else {
+                setting_editor(ui, value, spec);
+            }
             ui.label(spec.help);
         });
     });
@@ -34,6 +38,7 @@ pub(crate) fn render_overrides(
     overrides: &mut BTreeMap<String, String>,
     baseline: &BTreeMap<String, String>,
     scope: egui::Id,
+    available_formats: &[VideoFormat],
 ) {
     render_option_sections(ui, scope, false, |ui, spec| {
         let inherited = baseline.get(spec.key).cloned().unwrap_or_default();
@@ -47,7 +52,13 @@ pub(crate) fn render_overrides(
             if ui.checkbox(&mut enabled, "Override").changed() && enabled {
                 value = inherited.clone();
             }
-            ui.add_enabled_ui(enabled, |ui| setting_editor(ui, &mut value, spec));
+            ui.add_enabled_ui(enabled, |ui| {
+                if spec.key == "format" {
+                    render_format_selector(ui, &mut value, available_formats, scope);
+                } else {
+                    setting_editor(ui, &mut value, spec);
+                }
+            });
             if !enabled {
                 let inherited_label = if inherited.is_empty() {
                     "(empty)"
@@ -64,6 +75,103 @@ pub(crate) fn render_overrides(
             overrides.remove(spec.key);
         }
     });
+}
+
+fn render_format_selector(
+    ui: &mut egui::Ui,
+    value: &mut String,
+    choices: &[VideoFormat],
+    scope: egui::Id,
+) {
+    let selected = choices
+        .iter()
+        .find(|choice| choice.id == *value)
+        .map(|choice| choice.label.as_str())
+        .unwrap_or_else(|| {
+            if value.is_empty() {
+                "Select a format"
+            } else {
+                value
+            }
+        });
+    egui::ComboBox::from_id_salt((scope, "format-selector"))
+        .selected_text(selected)
+        .width(300.0)
+        .show_ui(ui, |ui| {
+            if choices.is_empty() {
+                ui.weak("Format list loads when this override is opened");
+            }
+            for choice in choices {
+                ui.selectable_value(value, choice.id.clone(), &choice.label);
+            }
+        });
+    ui.add(egui::TextEdit::singleline(value).desired_width(240.0));
+}
+
+fn common_format_presets() -> Vec<VideoFormat> {
+    [
+        (
+            "bestvideo+bestaudio/best",
+            "Best video + best audio (fallback to best)",
+        ),
+        ("best", "Best single-file format"),
+        ("bv*+ba/b", "Best video and audio (fallback to best)"),
+        ("b", "Best combined format"),
+        ("worst", "Worst available format"),
+    ]
+    .into_iter()
+    .map(|(id, label)| VideoFormat {
+        id: id.into(),
+        label: label.into(),
+    })
+    .collect()
+}
+
+pub(crate) fn parse_format_list(output: &str) -> Vec<VideoFormat> {
+    let mut in_table = false;
+    let mut formats = Vec::new();
+    for line in output.lines() {
+        let trimmed = line.trim();
+        let columns: Vec<_> = trimmed.split_whitespace().collect();
+        let heading = columns
+            .iter()
+            .map(|column| column.to_ascii_lowercase())
+            .collect::<Vec<_>>();
+        let has_header = (heading.len() >= 2 && heading[0] == "id" && heading[1] == "ext")
+            || (heading.len() >= 2 && heading[0] == "format" && heading[1] == "extension")
+            || (heading.len() >= 3
+                && heading[0] == "format"
+                && heading[1] == "code"
+                && heading[2] == "extension");
+        if has_header {
+            in_table = true;
+            continue;
+        }
+        if !in_table || columns.len() < 2 {
+            continue;
+        }
+        let format_id = columns[0];
+        if format_id.chars().all(|character| character == '-') {
+            continue;
+        }
+        if !format_id
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || "._-".contains(character))
+        {
+            continue;
+        }
+        if formats
+            .iter()
+            .any(|format: &VideoFormat| format.id == format_id)
+        {
+            continue;
+        }
+        formats.push(VideoFormat {
+            id: format_id.into(),
+            label: trimmed.into(),
+        });
+    }
+    formats
 }
 
 fn render_option_sections(
@@ -111,10 +219,22 @@ fn setting_editor(ui: &mut egui::Ui, value: &mut String, spec: &Spec) {
         }
         Kind::Choice(items) => {
             egui::ComboBox::from_id_salt(spec.key)
-                .selected_text(value.as_str())
+                .selected_text(if value.is_empty() {
+                    "Keep source container"
+                } else {
+                    value.as_str()
+                })
                 .show_ui(ui, |ui| {
                     for item in *items {
-                        ui.selectable_value(value, item.to_string(), *item);
+                        ui.selectable_value(
+                            value,
+                            item.to_string(),
+                            if item.is_empty() {
+                                "Keep source container"
+                            } else {
+                                item
+                            },
+                        );
                     }
                 });
         }

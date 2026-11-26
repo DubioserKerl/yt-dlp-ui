@@ -14,6 +14,7 @@ impl Default for Config {
         let mut settings = BTreeMap::new();
         for (key, value) in [
             ("format", "bestvideo+bestaudio/best"),
+            ("remux_video", ""),
             ("output", "%(title)s.%(ext)s"),
             ("download_archive", ""),
             ("paths", ""),
@@ -138,16 +139,17 @@ impl Spec {
             | "download_archive"
             | "playlist"
             | "sponsorblock"
-            | "sponsorblock_remove" => OptionCategory::VideoSelection,
+            | "sponsorblock_remove"
+            | "format"
+            | "remux_video" => OptionCategory::VideoSelection,
             "output" | "paths" | "cookies" | "continue" | "no_part" | "windows_filenames" => {
                 OptionCategory::Filesystem
             }
             "embed_thumbnail" => OptionCategory::Thumbnail,
             "no_warnings" => OptionCategory::Verbosity,
-            "format" | "audio_format" | "audio_quality" | "rate_limit" | "retries"
-            | "fragment_retries" | "sub_langs" | "write_subs" | "write_auto_subs"
-            | "embed_subs" | "embed_chapters" | "extract_audio" | "embed_metadata"
-            | "ffmpeg_location" => OptionCategory::Download,
+            "audio_format" | "audio_quality" | "rate_limit" | "retries" | "fragment_retries"
+            | "sub_langs" | "write_subs" | "write_auto_subs" | "embed_subs" | "embed_chapters"
+            | "extract_audio" | "embed_metadata" | "ffmpeg_location" => OptionCategory::Download,
             _ => OptionCategory::Download,
         }
     }
@@ -160,6 +162,13 @@ pub(crate) const SPECS: &[Spec] = &[
         flag: "-f",
         kind: Kind::Text,
         help: "yt-dlp format expression",
+    },
+    Spec {
+        key: "remux_video",
+        label: "Output container",
+        flag: "--remux-video",
+        kind: Kind::Choice(&["", "mp4", "mkv", "webm", "mov", "avi"]),
+        help: "Remux without re-encoding when supported; requires FFmpeg",
     },
     Spec {
         key: "output",
@@ -395,6 +404,19 @@ pub(crate) struct HistoryFile {
 pub(crate) enum Event {
     Line(u64, String),
     Done(u64, Result<(), String>),
+    Formats(u64, Result<Vec<VideoFormat>, String>),
+}
+
+#[derive(Clone)]
+pub(crate) struct VideoFormat {
+    pub(crate) id: String,
+    pub(crate) label: String,
+}
+
+pub(crate) enum FormatState {
+    Loading,
+    Loaded(Vec<VideoFormat>),
+    Failed(String),
 }
 
 #[derive(Clone, PartialEq)]
