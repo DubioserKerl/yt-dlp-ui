@@ -3,10 +3,26 @@ use eframe::egui;
 
 pub(super) fn show(app: &mut App, ui: &mut egui::Ui) {
     ui.heading("Downloads");
+    ui.horizontal(|ui| {
+        if ui
+            .button(if app.queue_paused {
+                "Resume queue"
+            } else {
+                "Pause after active download"
+            })
+            .clicked()
+        {
+            app.toggle_queue_pause();
+        }
+        if ui.button("Open log viewer").clicked() {
+            app.open_logs();
+        }
+    });
     if app.downloads.is_empty() {
         ui.label("No active or queued downloads");
     }
     let mut cancel_id = None;
+    let mut move_request = None;
     for entry in &app.downloads {
         ui.group(|ui| {
             ui.horizontal(|ui| {
@@ -17,6 +33,20 @@ pub(super) fn show(app: &mut App, ui: &mut egui::Ui) {
                     ui.label(&entry.url);
                 });
                 ui.strong(&entry.status);
+                if entry.status == "Queued" {
+                    if ui
+                        .add_enabled(app.can_move_download(entry.id, -1), egui::Button::new("↑"))
+                        .clicked()
+                    {
+                        move_request = Some((entry.id, -1));
+                    }
+                    if ui
+                        .add_enabled(app.can_move_download(entry.id, 1), egui::Button::new("↓"))
+                        .clicked()
+                    {
+                        move_request = Some((entry.id, 1));
+                    }
+                }
                 if entry.status != "Queued"
                     && entry.status != "Cancelling…"
                     && ui.button("Cancel").clicked()
@@ -36,5 +66,8 @@ pub(super) fn show(app: &mut App, ui: &mut egui::Ui) {
     }
     if let Some(id) = cancel_id {
         app.cancel_download(id);
+    }
+    if let Some((id, offset)) = move_request {
+        app.move_download(id, offset);
     }
 }
