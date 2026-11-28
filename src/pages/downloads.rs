@@ -61,6 +61,14 @@ pub(super) fn show(app: &mut App, ui: &mut egui::Ui) {
                     egui::ProgressBar::new(progress_fraction(&entry.progress))
                         .text(&entry.progress),
                 );
+                ui.horizontal(|ui| {
+                    if !entry.speed.is_empty() {
+                        ui.label(format!("Speed: {}", entry.speed));
+                    }
+                    if !entry.eta.is_empty() {
+                        ui.label(format!("ETA: {}", entry.eta));
+                    }
+                });
             }
         });
     }
