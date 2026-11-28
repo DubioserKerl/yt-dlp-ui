@@ -7,6 +7,40 @@ use eframe::egui;
 pub(super) fn show(app: &mut App, ui: &mut egui::Ui) {
     ui.heading("Options");
     ui.group(|ui| {
+        ui.heading("Download presets");
+        ui.horizontal(|ui| {
+            ui.text_edit_singleline(&mut app.preset_name);
+            if ui.button("Save current as preset").clicked() {
+                app.save_preset();
+            }
+        });
+        let names: Vec<_> = app.config.presets.keys().cloned().collect();
+        for name in names {
+            let is_builtin = app
+                .config
+                .presets
+                .get(&name)
+                .is_some_and(|preset| preset.built_in);
+            ui.horizontal(|ui| {
+                ui.label(if is_builtin {
+                    format!("{name} (built-in)")
+                } else {
+                    name.clone()
+                });
+                if ui.button("Apply").clicked() {
+                    app.apply_preset(&name);
+                }
+                if !is_builtin && ui.button("Delete").clicked() {
+                    app.delete_preset(&name);
+                }
+            });
+        }
+    });
+    ui.horizontal(|ui| {
+        ui.label("Automatic retries after failure");
+        ui.add(egui::DragValue::new(&mut app.config.retry_attempts).range(0..=10));
+    });
+    ui.group(|ui| {
         ui.heading("Notifications");
         let mut notifications_enabled = app.config.notifications_enabled;
         if ui
