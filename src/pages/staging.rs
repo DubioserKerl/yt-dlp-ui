@@ -23,11 +23,19 @@ pub(super) fn show(app: &mut App, ui: &mut egui::Ui) {
     ui.separator();
 
     let baseline = app.config.settings.clone();
+    let preset_names: Vec<_> = app.config.presets.keys().cloned().collect();
     let format_states = &app.format_states;
     let mut remove_id = None;
     let mut start_ids = Vec::new();
+    let mut retry_ids = Vec::new();
     let mut format_load_ids = Vec::new();
+    let mut playlist_load_ids = Vec::new();
+    let mut playlist_stage_ids = Vec::new();
     for entry in app.staging.iter_mut() {
+        let mut override_baseline = baseline.clone();
+        if let Some(preset) = app.config.presets.get(&entry.preset) {
+            override_baseline.extend(preset.settings.clone());
+        }
         let format_state = format_states.get(&entry.id);
         let available_formats = match format_state {
             Some(crate::model::FormatState::Loaded(formats)) => formats.as_slice(),
@@ -54,8 +62,11 @@ pub(super) fn show(app: &mut App, ui: &mut egui::Ui) {
                         }
                     });
                 });
-                if ui.button("Download").clicked() {
+                if entry.error.is_empty() && ui.button("Download").clicked() {
                     start_ids.push(entry.id);
+                }
+                if !entry.error.is_empty() && ui.button("Retry").clicked() {
+                    retry_ids.push(entry.id);
                 }
                 if ui.button("Remove").clicked() {
                     remove_id = Some(entry.id);
@@ -87,12 +98,65 @@ pub(super) fn show(app: &mut App, ui: &mut egui::Ui) {
                     app.notice = entry.error.clone();
                 }
             }
+            ui.horizontal(|ui| {
+                ui.label("Output folder override");
+                ui.text_edit_singleline(&mut entry.output_directory);
+                if ui.button("Browse…").clicked() {
+                    if let Some(path) = rfd::FileDialog::new().pick_folder() {
+                        entry.output_directory = path.display().to_string();
+                    }
+                }
+            });
+            if app.playlist_loading.contains(&entry.id) {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label("Loading playlist preview…");
+                });
+            } else if !app.playlist_previews.contains_key(&entry.id) {
+                if ui.button("Preview playlist").clicked() {
+                    playlist_load_ids.push(entry.id);
+                }
+            }
+            if let Some(items) = app.playlist_previews.get(&entry.id) {
+                ui.label(format!("Playlist contains {} videos:", items.len()));
+                let selected = app
+                    .selected_playlist_items
+                    .entry(entry.id)
+                    .or_insert_with(|| vec![false; items.len()]);
+                egui::ScrollArea::vertical()
+                    .max_height(260.0)
+                    .show(ui, |ui| {
+                        for (index, item) in items.iter().enumerate() {
+                            if let Some(include) = selected.get_mut(index) {
+                                ui.checkbox(include, format!("{} — {}", item.title, item.url));
+                            }
+                        }
+                    });
+                if ui.button("Add selected videos to staging").clicked() {
+                    playlist_stage_ids.push(entry.id);
+                }
+            }
             let override_section = ui.collapsing("Override arguments for this download", |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Preset override");
+                    egui::ComboBox::from_id_salt(("download-preset", entry.id))
+                        .selected_text(if entry.preset.is_empty() {
+                            "Use baseline"
+                        } else {
+                            &entry.preset
+                        })
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut entry.preset, String::new(), "Use baseline");
+                            for name in &preset_names {
+                                ui.selectable_value(&mut entry.preset, name.clone(), name);
+                            }
+                        });
+                });
                 let scope = egui::Id::new(("download-overrides", entry.id));
                 render_overrides(
                     ui,
                     &mut entry.overrides,
-                    &baseline,
+                    &override_baseline,
                     scope,
                     available_formats,
                 );
@@ -117,5 +181,14 @@ pub(super) fn show(app: &mut App, ui: &mut egui::Ui) {
     }
     for id in format_load_ids {
         app.load_formats(id);
+    }
+    for id in retry_ids {
+        app.retry_download(id);
+    }
+    for id in playlist_load_ids {
+        app.load_playlist_preview(id);
+    }
+    for id in playlist_stage_ids {
+        app.stage_selected_playlist_items(id);
     }
 }
