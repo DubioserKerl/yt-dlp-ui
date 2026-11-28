@@ -3,7 +3,9 @@ use crate::{
         canonical, cleanup_partial_files, is_youtube_url, normalize_staging_url,
         parse_command_line, parse_format_list, pump_output,
     },
-    model::{Config, Entry, Event, FormatState, HistoryFile, Page, SPECS},
+    model::{
+        Config, Entry, Event, FormatState, HistoryFile, Page, PlaylistItem, SPECS, built_in_presets,
+    },
     pages,
 };
 
@@ -105,6 +107,11 @@ fn restore_history(config: &Config) -> (Vec<Entry>, u64, String) {
                         error: String::new(),
                         overrides: Default::default(),
                         extra_args: String::new(),
+                        output_directory: String::new(),
+                        attempts: 0,
+                        speed: String::new(),
+                        eta: String::new(),
+                        preset: String::new(),
                     });
                     next_id = next_id.saturating_add(1);
                     recovered += 1;
@@ -135,6 +142,12 @@ fn persist_history(history: &[Entry]) -> std::io::Result<()> {
     std::fs::write(HISTORY_FILE, contents)
 }
 
+fn add_missing_built_in_presets(config: &mut Config) {
+    for (name, preset) in built_in_presets() {
+        config.presets.entry(name).or_insert(preset);
+    }
+}
+
 fn unix_timestamp() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -143,7 +156,7 @@ fn unix_timestamp() -> i64 {
 }
 use eframe::egui;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     process::{Child, Command, Stdio},
     sync::{
         Arc, Mutex,
@@ -160,6 +173,13 @@ pub(crate) struct App {
     pub(crate) downloads: Vec<Entry>,
     pub(crate) history: Vec<Entry>,
     pub(crate) format_states: HashMap<u64, FormatState>,
+    pub(crate) playlist_previews: HashMap<u64, Vec<PlaylistItem>>,
+    pub(crate) playlist_loading: Vec<u64>,
+    pub(crate) selected_playlist_items: HashMap<u64, Vec<bool>>,
+    pub(crate) queue_paused: bool,
+    pub(crate) logs: VecDeque<String>,
+    pub(crate) log_filter: String,
+    pub(crate) preset_name: String,
     notification_processes: Vec<Child>,
     page: Page,
     next_id: u64,
@@ -177,10 +197,11 @@ pub(crate) struct App {
 
 impl App {
     fn new() -> Self {
-        let config = std::fs::read_to_string("yt-dlp-ui.toml")
+        let mut config = std::fs::read_to_string("yt-dlp-ui.toml")
             .ok()
             .and_then(|contents| toml::from_str(&contents).ok())
             .unwrap_or_default();
+        add_missing_built_in_presets(&mut config);
         let (mut history, next_id, notice) = restore_history(&config);
         let (mut staging, staging_notice) = restore_staging();
         let staging_snapshot = staging.clone();
@@ -231,6 +252,13 @@ impl App {
             downloads: Vec::new(),
             history,
             format_states: HashMap::new(),
+            playlist_previews: HashMap::new(),
+            playlist_loading: Vec::new(),
+            selected_playlist_items: HashMap::new(),
+            queue_paused: false,
+            logs: VecDeque::new(),
+            log_filter: String::new(),
+            preset_name: String::new(),
             notification_processes: Vec::new(),
             page: Page::Staging,
             next_id,
@@ -252,6 +280,10 @@ impl App {
     }
 
     pub(crate) fn add_url(&mut self, url: &str) {
+        self.add_url_with_notification(url, true);
+    }
+
+    fn add_url_with_notification(&mut self, url: &str, notify_when_ready: bool) {
         if !is_youtube_url(url) {
             return;
         }
@@ -282,9 +314,14 @@ impl App {
             error: String::new(),
             overrides: Default::default(),
             extra_args: String::new(),
+            output_directory: String::new(),
+            attempts: 0,
+            speed: String::new(),
+            eta: String::new(),
+            preset: String::new(),
         });
         self.save_staging_if_changed();
-        self.lookup_title(self.next_id, clean.clone(), true);
+        self.lookup_title(self.next_id, clean.clone(), notify_when_ready);
         self.next_id += 1;
     }
 
@@ -422,11 +459,15 @@ impl App {
 
     fn command_args(&self, entry: &Entry) -> Vec<String> {
         let mut args = Vec::new();
+        let selected_preset = self.config.presets.get(&entry.preset);
         for spec in SPECS {
             let value = entry
                 .overrides
                 .get(spec.key)
                 .cloned()
+                .or_else(|| {
+                    selected_preset.and_then(|preset| preset.settings.get(spec.key).cloned())
+                })
                 .or_else(|| self.config.settings.get(spec.key).cloned())
                 .unwrap_or_default();
             if value.is_empty() {
@@ -456,8 +497,16 @@ impl App {
         if let Ok(extra) = shell_words::split(&self.config.extra_args) {
             args.extend(extra);
         }
+        if let Some(preset) = selected_preset {
+            if let Ok(extra) = shell_words::split(&preset.extra_args) {
+                args.extend(extra);
+            }
+        }
         if let Ok(extra) = shell_words::split(&entry.extra_args) {
             args.extend(extra);
+        }
+        if !entry.output_directory.trim().is_empty() {
+            args.extend(["-P".into(), entry.output_directory.clone()]);
         }
         args.push(entry.url.clone());
         args
@@ -482,6 +531,176 @@ impl App {
             "",
             "",
         );
+    }
+
+    pub(crate) fn toggle_queue_pause(&mut self) {
+        self.queue_paused = !self.queue_paused;
+        if !self.queue_paused {
+            self.start_next_download();
+        }
+    }
+
+    pub(crate) fn move_download(&mut self, id: u64, offset: isize) {
+        let Some(index) = self.downloads.iter().position(|entry| entry.id == id) else {
+            return;
+        };
+        if self.downloads[index].status != "Queued" {
+            return;
+        }
+        let first_queued = usize::from(self.running_cancel.is_some());
+        let target = (index as isize + offset)
+            .clamp(first_queued as isize, self.downloads.len() as isize - 1)
+            as usize;
+        self.downloads.swap(index, target);
+    }
+
+    pub(crate) fn can_move_download(&self, id: u64, offset: isize) -> bool {
+        let Some(index) = self.downloads.iter().position(|entry| entry.id == id) else {
+            return false;
+        };
+        if self.downloads[index].status != "Queued" {
+            return false;
+        }
+        let first_queued = usize::from(self.running_cancel.is_some());
+        let target = index as isize + offset;
+        target >= first_queued as isize && target < self.downloads.len() as isize
+    }
+
+    pub(crate) fn retry_download(&mut self, id: u64) {
+        let Some(index) = self.staging.iter().position(|entry| entry.id == id) else {
+            return;
+        };
+        self.staging[index].error.clear();
+        self.staging[index].attempts = 0;
+        self.start_download(index);
+    }
+
+    pub(crate) fn save_preset(&mut self) {
+        let name = self.preset_name.trim().to_string();
+        if name.is_empty() {
+            return;
+        }
+        self.config.presets.insert(
+            name.clone(),
+            crate::model::Preset {
+                settings: self.config.settings.clone(),
+                extra_args: self.config.extra_args.clone(),
+                built_in: false,
+            },
+        );
+        self.save_config();
+        self.notice = format!("Saved preset: {name}");
+    }
+
+    pub(crate) fn delete_preset(&mut self, name: &str) {
+        self.config.presets.remove(name);
+        let mut staging_changed = false;
+        for entry in &mut self.staging {
+            if entry.preset == name {
+                entry.preset.clear();
+                staging_changed = true;
+            }
+        }
+        if staging_changed {
+            self.save_staging_if_changed();
+        }
+        self.save_config();
+        self.notice = format!("Deleted preset: {name}");
+    }
+
+    pub(crate) fn open_logs(&mut self) {
+        self.page = Page::Logs;
+    }
+
+    pub(crate) fn apply_preset(&mut self, name: &str) {
+        let Some(preset) = self.config.presets.get(name).cloned() else {
+            return;
+        };
+        if preset.built_in {
+            self.config.settings.extend(preset.settings);
+        } else {
+            self.config.settings = preset.settings;
+            self.config.extra_args = preset.extra_args;
+        }
+        self.notice = format!("Applied preset: {name}");
+    }
+
+    pub(crate) fn load_playlist_preview(&mut self, id: u64) {
+        if self.playlist_loading.contains(&id) {
+            return;
+        }
+        let Some(entry) = self.staging.iter().find(|entry| entry.id == id) else {
+            return;
+        };
+        let url = entry.url.clone();
+        let executable = self.config.executable.clone();
+        self.playlist_loading.push(id);
+        let tx = self.tx.clone();
+        thread::spawn(move || {
+            let mut command = Command::new(&executable);
+            command.args([
+                "--flat-playlist",
+                "--ignore-errors",
+                "--no-warnings",
+                "--print",
+                "%(title)s\\t%(webpage_url)s",
+                &url,
+            ]);
+            command.stdout(Stdio::piped()).stderr(Stdio::piped());
+            configure_hidden_console(&mut command);
+            let result = match command.output() {
+                Ok(output) if output.status.success() => {
+                    let rows = String::from_utf8_lossy(&output.stdout);
+                    let items = rows
+                        .lines()
+                        .filter_map(|row| {
+                            let (title, url) = row.split_once('\t')?;
+                            is_youtube_url(url).then(|| PlaylistItem {
+                                title: title.into(),
+                                url: normalize_staging_url(url),
+                            })
+                        })
+                        .collect::<Vec<_>>();
+                    if items.is_empty() {
+                        Err("No playlist items were returned by yt-dlp.".into())
+                    } else {
+                        Ok(items)
+                    }
+                }
+                Ok(output) => Err(String::from_utf8_lossy(&output.stderr).trim().to_string()),
+                Err(error) => Err(format!("Could not start {executable}: {error}")),
+            };
+            let _ = tx.send(Event::Playlist(id, result));
+        });
+    }
+
+    pub(crate) fn stage_selected_playlist_items(&mut self, id: u64) {
+        let Some(items) = self.playlist_previews.get(&id).cloned() else {
+            return;
+        };
+        let selected = self
+            .selected_playlist_items
+            .get(&id)
+            .cloned()
+            .unwrap_or_default();
+        let mut added = 0;
+        for (index, item) in items.into_iter().enumerate() {
+            if !selected.get(index).copied().unwrap_or(false) {
+                continue;
+            }
+            let before = self.staging.len();
+            self.add_url_with_notification(&item.url, false);
+            if self.staging.len() > before {
+                added += 1;
+                if let Some(entry) = self.staging.last_mut() {
+                    entry.title = item.title;
+                }
+            }
+        }
+        self.save_staging_if_changed();
+        if added > 0 {
+            self.notify(&format!("Added {added} selected videos to staging"), "", "");
+        }
     }
 
     fn queue_download(&mut self, index: usize, show_notification: bool) {
@@ -592,7 +811,7 @@ impl App {
     }
 
     fn start_next_download(&mut self) {
-        if self.running_cancel.is_some() {
+        if self.running_cancel.is_some() || self.queue_paused {
             return;
         }
         let Some(index) = self
@@ -759,6 +978,7 @@ impl App {
         {
             Some(config) => {
                 self.config = config;
+                add_missing_built_in_presets(&mut self.config);
                 self.notice = "Configuration imported".into();
             }
             None => self.notice = "Could not read that TOML configuration".into(),
@@ -840,12 +1060,28 @@ impl App {
         while let Ok(event) = self.rx.try_recv() {
             match event {
                 Event::Line(id, line) => {
+                    self.logs.push_back(format!("[{id}] {line}"));
+                    while self.logs.len() > 5000 {
+                        self.logs.pop_front();
+                    }
                     if let Some(entry) = self.downloads.iter_mut().find(|entry| entry.id == id) {
                         if entry.status != "Cancelling…" {
                             entry.status = "Downloading".into();
                         }
                         if line.contains('%') || !line.trim().is_empty() {
                             entry.progress = line.clone();
+                        }
+                        if let Some(value) =
+                            line.split_whitespace().find(|part| part.ends_with("/s"))
+                        {
+                            entry.speed = value.to_string();
+                        }
+                        if let Some(position) = line.find(" ETA ") {
+                            entry.eta = line[position + 5..]
+                                .split_whitespace()
+                                .next()
+                                .unwrap_or_default()
+                                .to_string();
                         }
                         if line.to_lowercase().contains("error:") {
                             entry.error = line;
@@ -862,13 +1098,9 @@ impl App {
                         {
                             self.running_cancel = None;
                         }
-                        let (heading, title, url) = match &result {
-                            Ok(()) => ("Download finished", entry.title.clone(), entry.url.clone()),
-                            Err(_) => ("Download failed", entry.title.clone(), entry.url.clone()),
-                        };
-                        self.notify(heading, &title, &url);
                         match result {
                             Ok(()) => {
+                                self.notify("Download finished", &entry.title, &entry.url);
                                 entry.status = "Finished".into();
                                 entry.progress = "Complete".into();
                                 entry.error.clear();
@@ -877,15 +1109,31 @@ impl App {
                                 self.save_history();
                             }
                             Err(error) => {
-                                entry.status = "Failed".into();
-                                if entry.error.is_empty() {
-                                    entry.error = error;
+                                self.logs
+                                    .push_back(format!("[{id}] Download error: {error}"));
+                                let can_retry = !error.contains("Cancelled by user")
+                                    && entry.attempts < self.config.retry_attempts;
+                                if can_retry {
+                                    entry.attempts += 1;
+                                    entry.status = "Queued".into();
+                                    entry.progress = format!(
+                                        "Retry {} of {}",
+                                        entry.attempts, self.config.retry_attempts
+                                    );
+                                    entry.error.clear();
+                                    self.downloads.insert(0, entry);
                                 } else {
-                                    entry.error.push('\n');
-                                    entry.error.push_str(&error);
+                                    self.notify("Download failed", &entry.title, &entry.url);
+                                    entry.status = "Failed".into();
+                                    if entry.error.is_empty() {
+                                        entry.error = error;
+                                    } else {
+                                        entry.error.push('\n');
+                                        entry.error.push_str(&error);
+                                    }
+                                    self.staging.push(entry);
+                                    self.save_staging_if_changed();
                                 }
-                                self.staging.push(entry);
-                                self.save_staging_if_changed();
                             }
                         }
                         self.start_next_download();
@@ -946,6 +1194,17 @@ impl App {
                     }
                     if in_history {
                         self.save_history();
+                    }
+                }
+                Event::Playlist(id, result) => {
+                    self.playlist_loading.retain(|loading_id| *loading_id != id);
+                    match result {
+                        Ok(items) => {
+                            self.selected_playlist_items
+                                .insert(id, vec![false; items.len()]);
+                            self.playlist_previews.insert(id, items);
+                        }
+                        Err(error) => self.notice = format!("Could not load playlist: {error}"),
                     }
                 }
             }
@@ -1025,6 +1284,7 @@ impl eframe::App for App {
                     ("Downloads", Page::Downloads),
                     ("History", Page::History),
                     ("Options", Page::Options),
+                    ("Logs", Page::Logs),
                 ] {
                     if ui.selectable_label(self.page == page, label).clicked() {
                         self.page = page;

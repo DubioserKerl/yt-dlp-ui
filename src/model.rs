@@ -10,6 +10,10 @@ pub(crate) struct Config {
     pub(crate) notifications_enabled: bool,
     pub(crate) notification_display_seconds: u32,
     pub(crate) notification_color_scheme: String,
+    #[serde(default)]
+    pub(crate) presets: BTreeMap<String, Preset>,
+    #[serde(default)]
+    pub(crate) retry_attempts: u32,
 }
 
 impl Default for Config {
@@ -69,8 +73,49 @@ impl Default for Config {
             notifications_enabled: true,
             notification_display_seconds: 6,
             notification_color_scheme: "Blue".into(),
+            presets: built_in_presets(),
+            retry_attempts: 0,
         }
     }
+}
+
+#[derive(Clone, Default, Serialize, Deserialize)]
+pub(crate) struct Preset {
+    pub(crate) settings: BTreeMap<String, String>,
+    pub(crate) extra_args: String,
+    #[serde(default)]
+    pub(crate) built_in: bool,
+}
+
+pub(crate) fn built_in_presets() -> BTreeMap<String, Preset> {
+    let mut video_settings = BTreeMap::new();
+    video_settings.insert("format".into(), "bestvideo+bestaudio/best".into());
+    video_settings.insert("extract_audio".into(), "false".into());
+
+    let mut audio_settings = BTreeMap::new();
+    audio_settings.insert("format".into(), "bestaudio/best".into());
+    audio_settings.insert("extract_audio".into(), "true".into());
+    audio_settings.insert("audio_format".into(), "best".into());
+    audio_settings.insert("audio_quality".into(), "0".into());
+
+    BTreeMap::from([
+        (
+            "Best video quality".into(),
+            Preset {
+                settings: video_settings,
+                extra_args: String::new(),
+                built_in: true,
+            },
+        ),
+        (
+            "Best audio quality".into(),
+            Preset {
+                settings: audio_settings,
+                extra_args: String::new(),
+                built_in: true,
+            },
+        ),
+    ])
 }
 
 #[derive(Clone, PartialEq)]
@@ -515,6 +560,16 @@ pub(crate) struct Entry {
     pub(crate) error: String,
     pub(crate) overrides: BTreeMap<String, String>,
     pub(crate) extra_args: String,
+    #[serde(default)]
+    pub(crate) output_directory: String,
+    #[serde(default)]
+    pub(crate) attempts: u32,
+    #[serde(default)]
+    pub(crate) speed: String,
+    #[serde(default)]
+    pub(crate) eta: String,
+    #[serde(default)]
+    pub(crate) preset: String,
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -528,6 +583,13 @@ pub(crate) enum Event {
     Done(u64, Result<(), String>),
     Formats(u64, Result<Vec<VideoFormat>, String>),
     Title(u64, Result<String, String>, bool),
+    Playlist(u64, Result<Vec<PlaylistItem>, String>),
+}
+
+#[derive(Clone)]
+pub(crate) struct PlaylistItem {
+    pub(crate) title: String,
+    pub(crate) url: String,
 }
 
 #[derive(Clone)]
@@ -548,4 +610,5 @@ pub(crate) enum Page {
     Downloads,
     History,
     Options,
+    Logs,
 }
